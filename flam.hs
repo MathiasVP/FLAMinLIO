@@ -1,5 +1,5 @@
 {-# LANGUAGE FlexibleInstances, ViewPatterns, PostfixOperators, OverloadedStrings, MultiParamTypeClasses, ExplicitForAll, ScopedTypeVariables, LambdaCase, MonadComprehensions #-}
-module FLAM(Principal(..), (≽), (⊑), H(..), FLAM, bot, top, (%), (/|\), (\|/), (→), (←)) where
+module FLAM(Principal(..), (≽), (⊑), H(..), FLAM, normalize, bot, top, (%), (/|\), (\|/), (→), (←)) where
 
 import LIO
 import TCB()

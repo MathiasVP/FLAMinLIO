@@ -7,7 +7,7 @@ import Control.Monad.State
 import Data.IORef
 import Control.Lens
 
-{- We need to seperate these two classes in order to call (⊔)
+{- We need to seperate these two classes in order to call (⊔) and (⊔)
    without getting an ambiguity error since these two functions
    do not mention the state -}
 class SemiLattice l where
@@ -112,15 +112,15 @@ unlabel :: Label t s l => Labeled l a -> LIO s l a
 unlabel = run . unlabel'
 
 toLabeled' :: Label t s l => l -> LIO s l a -> t (LIO s l) (Labeled l a)
-toLabeled' l x = do
-  l' <- lift get
-  r <- lift x
-  l'' <- lift $ gets $ view $ _1 .cur
+toLabeled' l m = do
+  l' <- lift $ gets $ view _1
+  res <- lift m
+  l'' <- lift $ gets $ view $ _1 . cur
   b <- l'' .⊑ l
-  unless b $
+  unless b $ do
     fail ("IFC violation: " ++ show l'' ++ " ⊑ " ++ show l)
-  lift $ put l'
-  label' l r
+  lift $ modify $ (_1 .~ l')
+  label' l res
 
 toLabeled :: Label t s l => l -> LIO s l a -> LIO s l (Labeled l a)
 toLabeled l x = run (toLabeled' l x)
