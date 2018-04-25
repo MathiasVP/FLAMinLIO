@@ -54,7 +54,7 @@ example_implicit x = do
 
 example_implicit2 :: LIO H FLAM Bool
 example_implicit2 = do
-  s <- label ("alice" \|/ "bob") True
+  s <- label ("alice" \/ "bob") True
   example_implicit s
 
 leak :: Labeled FLAM Int -> LIO H FLAM ()

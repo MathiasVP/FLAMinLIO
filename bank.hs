@@ -36,7 +36,7 @@ transfer accountant from to amount =
   lift ((accountant %) ≽ (from %)) >>= \case
     True -> do
       gets (Map.lookup from) >>= \case
-        Just account  -> do
+        Just account -> do
           balance <- lift $ unlabel account
           {- At this point the current label is alice->.
              That is, we have observed sensitive information to Alice, which we now
@@ -55,25 +55,31 @@ getBalance u =
     Just account -> lift $ unlabel account
     Nothing -> return 0
 
-addAccountant :: Principal -> Principal -> User -> StateT Bank FLAMIO ()
-addAccountant accountant witness user = do
+addAccountant :: Principal -> User -> StateT Bank FLAMIO ()
+addAccountant accountant user = do
   h <- lift $ getState
-  del <- lift $ label witness (accountant, (user %))
+  del <- lift $ label (accountant :\/ (user %)) (accountant, (user %))
   lift $ setState $ H $ Set.insert del (unH h)
 
 initialBank :: Bank
-initialBank = Map.fromList [("alice", Labeled { _labeledLab = ("alice" %),
-                                                _labeledVal = 100 })]
+initialBank = Map.fromList []
 
 initialH :: H
 initialH = H $ Set.fromList [Labeled { _labeledLab = bot,
-                                       _labeledVal = (("bob" →), ("alice" →)) }]
+                                       _labeledVal = (("bob" →), ("alice" →))}]
 
 evalBank :: StateT Bank FLAMIO a -> FLAMIO a
 evalBank = flip evalStateT initialBank
 
 example :: FLAMIO Amount
 example = evalBank $ do
-  addAccountant ("Jon Doe" %) bot "alice"
-  transfer ("Jon Doe" %) "alice" "bob" 10
-  getBalance "bob"
+  "alice" += 100
+  _ <- toLabeled ("alice" %) $ do
+    addAccountant ("John Doe" %) "alice"
+    transfer ("John Doe" %) "alice" "bob" 25
+  b <- getBalance "bob"
+  l <- lift $ getLabel
+  lift $ LIO . StateT $ \s -> do
+    print l
+    return ((), s)
+  return b

@@ -1,5 +1,6 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances, ViewPatterns, PostfixOperators, OverloadedStrings, MultiParamTypeClasses, ExplicitForAll, ScopedTypeVariables, LambdaCase, MonadComprehensions #-}
-module FLAM(Principal(..), (≽), (⊑), H(..), FLAM, FLAMIO, bot, top, (%), (/|\), (\|/), (→), (←)) where
+module FLAM(Principal(..), (≽), (⊑), H(..), FLAM, FLAMIO, bot, top, (%), (/\), (\/), (→), (←)) where
 
 import LIO
 import TCB()
@@ -52,7 +53,7 @@ setFilterM f s = do
   s' <- filterM f (Set.toList s)
   return $ Set.fromList s'
 
-(.≽.) :: Principal -> Principal -> ReaderT Trace (LIO H FLAM) Bool
+(.≽.) :: (MonadLIO H FLAM m) => Principal -> Principal -> ReaderT Trace m Bool
 p .≽. q = do
   {-(_, indent) <- ask
   lift $ LIO . StateT $ \s -> do
@@ -74,49 +75,49 @@ p .≽. q = do
         return ((), s)-}
       return r
 
-bot_ :: (Principal, Principal) -> ReaderT Trace (LIO H FLAM) Bool
+bot_ :: (MonadLIO H FLAM m) => (Principal, Principal) -> ReaderT Trace m Bool
 bot_ (_, (:⊥)) = return True
 bot_ _ = return False
 
-top_ :: (Principal, Principal) -> ReaderT Trace (LIO H FLAM) Bool
+top_ :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
 top_ ((:⊤), _) = return True
 top_ _ = return False
 
-refl :: (Principal, Principal) -> ReaderT Trace (LIO H FLAM) Bool
+refl :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
 refl (p, q) | p == q = return True
 refl _ = return False
 
-proj :: (Principal, Principal) -> ReaderT Trace (LIO H FLAM) Bool
+proj :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
 proj ((:→) p, (:→) q) = p .≽. q
 proj ((:←) p, (:←) q) = p .≽. q
 proj _ = return False
 
-projR :: (Principal, Principal) -> ReaderT Trace (LIO H FLAM) Bool
+projR :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
 projR (p, (:←) q) | p == q = return True
 projR (p, (:→) q) | p == q = return True
 projR _ = return False
 
-own1 :: (Principal, Principal) -> ReaderT Trace (LIO H FLAM) Bool
+own1 :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
 own1 (o ::: p, o' ::: p') = o .≽. o' <&&> p .≽. p'
 own1 _ = return False
 
-own2 :: (Principal, Principal) -> ReaderT Trace (LIO H FLAM) Bool
+own2 :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
 own2 (o ::: p, o' ::: p') = o .≽. o' <&&> p .≽. (o' ::: p')
 own2 _ = return False
 
-conjL :: (Principal, Principal) -> ReaderT Trace (LIO H FLAM) Bool
+conjL :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
 conjL (p1 :/\ p2, p) = p1 .≽. p <||> p2 .≽. p
 conjL _ = return False
 
-conjR :: (Principal, Principal) -> ReaderT Trace (LIO H FLAM) Bool
+conjR :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
 conjR (p, p1 :/\ p2) = p .≽. p1 <&&> p .≽. p2
 conjR _ = return False
 
-disjL :: (Principal, Principal) -> ReaderT Trace (LIO H FLAM) Bool
+disjL :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
 disjL (p1 :\/ p2, p) = p .≽. p1 <&&> p .≽. p2
 disjL _ = return False
 
-disjR :: (Principal, Principal) -> ReaderT Trace (LIO H FLAM) Bool
+disjR :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
 disjR (p, p1 :\/ p2) = p1 .≽. p <||> p2 .≽. p
 disjR _ = return False
 
@@ -171,7 +172,7 @@ transitive s
               ps <- sequence [bs | M bs <- Set.toList ms]]
   where mkM = M . Set.singleton
 
-del :: (Principal, Principal) -> ReaderT Trace (LIO H FLAM) Bool
+del :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
 del (p, q) = do
   clr <- lift getClearance
   l <- lift getLabel
@@ -193,7 +194,7 @@ del (p, q) = do
         setMapM (\lab -> unlabel' lab) $ (unH h)
   if reach (p, q) h' then return True else return False
   
-(.≽) :: Principal -> Principal -> ReaderT Trace (LIO H FLAM) Bool
+(.≽) :: MonadLIO H FLAM m => Principal -> Principal -> ReaderT Trace m Bool
 p .≽ q =
   bot_ (p, q) <||>
     top_ (p, q) <||>
@@ -447,13 +448,13 @@ instance ToPrincipal L where
   (%) B = (:⊥)
   (%) (p :.: q) = (%) p ::: (%) q
 
-(/|\) :: (ToPrincipal a, ToPrincipal b) => a -> b -> Principal
-a /|\ b = (a %) :/\ (b %)
-infixr 7 /|\
+(/\) :: (ToPrincipal a, ToPrincipal b) => a -> b -> Principal
+a /\ b = (a %) :/\ (b %)
+infixr 7 /\
 
-(\|/) :: (ToPrincipal a, ToPrincipal b) => a -> b -> Principal
-a \|/ b = (a %) :\/ (b %)
-infixr 7 \|/
+(\/) :: (ToPrincipal a, ToPrincipal b) => a -> b -> Principal
+a \/ b = (a %) :\/ (b %)
+infixr 7 \/
 
 (→) :: (ToPrincipal a) => a -> Principal
 (→) a = (:→) (a %)
