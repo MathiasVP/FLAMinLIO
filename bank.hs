@@ -55,31 +55,63 @@ getBalance u =
     Just account -> lift $ unlabel account
     Nothing -> return 0
 
-addAccountant :: Principal -> User -> StateT Bank FLAMIO ()
-addAccountant accountant user = do
+addRole :: String -> StateT Bank FLAMIO ()
+addRole role = do
   h <- lift $ getState
-  del <- lift $ label (accountant :\/ (user %)) (accountant, (user %))
+  del <- lift $ label bot (("Bank" %), (role %))
   lift $ setState $ H $ Set.insert del (unH h)
 
-initialBank :: Bank
-initialBank = Map.fromList []
+addCustomer :: String -> StateT Bank FLAMIO ()
+addCustomer customer = do
+  h <- lift $ getState
+  del <- lift $ label (("Bank" .: "Manager") ←) ((customer %), "Bank" .: "Customer")
+  lift $ setState $ H $ Set.insert del (unH h)
 
-initialH :: H
-initialH = H $ Set.fromList [Labeled { _labeledLab = bot,
-                                       _labeledVal = (("bob" →), ("alice" →))}]
+addAccountManager :: String -> StateT Bank FLAMIO ()
+addAccountManager accountant = do
+  h <- lift $ getState
+  del <- lift $ label (("Bank" .: "Director") ←) ((accountant %), "Bank" .: "Manager")
+  lift $ setState $ H $ Set.insert del (unH h)
+
+addDirector :: String -> StateT Bank FLAMIO ()
+addDirector dir = do
+  h <- lift $ getState
+  del <- lift $ label ("Bank" ←) ((dir %), "Bank" .: "Director")
+  lift $ setState $ H $ Set.insert del (unH h)
+
+assignAccountManager :: String -> String -> StateT Bank FLAMIO () 
+assignAccountManager manager customer = do
+  h <- lift $ getState
+  del <- lift $ label bot ((manager %), (customer %))
+  lift $ setState $ H $ Set.insert del (unH h)
 
 evalBank :: StateT Bank FLAMIO a -> FLAMIO a
-evalBank = flip evalStateT initialBank
+evalBank = flip evalStateT Map.empty
 
 example :: FLAMIO Amount
 example = evalBank $ do
+  -- Initial bank
   "alice" += 100
-  _ <- toLabeled ("alice" %) $ do
-    addAccountant ("John Doe" %) "alice"
-    transfer ("John Doe" %) "alice" "bob" 25
-  b <- getBalance "bob"
-  l <- lift $ getLabel
+
+  addRole "Customer"
+  addRole "Manager"
+  addRole "Director"
+
+  addCustomer "Charlie"
+  addCustomer "Chloe"
+  addCustomer "Charlotte"
+
+  addAccountManager "Matt"
+  addAccountManager "Michael"
+
+  addDirector "David"
+
+  assignAccountManager "Matt" "Charlie"
+  assignAccountManager "Michael" "Chloe"
+  assignAccountManager "Michael" "Charlotte"
+
+  b <- liftLIO $ ("Charlie" →) ⊑ ("David" →)
   lift $ LIO . StateT $ \s -> do
-    print l
+    print b
     return ((), s)
-  return b
+  return 0

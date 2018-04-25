@@ -32,7 +32,7 @@ instance (Label t s l, MonadLIO s l m) => MonadLIO s l (StateT st m) where
     x <- liftLIO m
     return (x, st)
 
-class (Show l, SemiLattice l, MonadTrans t, Monad (t (LIO s l))) => Label t s l | s l -> t where
+class (Show l, SemiLattice l, MonadTrans t) => Label t s l | s l -> t where
   (.⊑) :: MonadLIO s l m => l -> l -> t m Bool
   run :: MonadLIO s l m => t m a -> m a
 

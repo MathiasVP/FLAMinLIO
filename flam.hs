@@ -1,6 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances, ViewPatterns, PostfixOperators, OverloadedStrings, MultiParamTypeClasses, ExplicitForAll, ScopedTypeVariables, LambdaCase, MonadComprehensions #-}
-module FLAM(Principal(..), (≽), (⊑), H(..), FLAM, FLAMIO, bot, top, (%), (/\), (\/), (→), (←)) where
+module FLAM(Principal(..), (≽), (⊑), H(..), FLAM, FLAMIO, bot, top, (%), (/\), (\/), (→), (←), (.:)) where
 
 import LIO
 import TCB()
@@ -287,6 +287,7 @@ reify (JNF c i) = ((:→) (reifyJ c)) :/\ ((:←) (reifyJ i))
  reifyBase B = (:⊥)
  reifyBase T = (:⊤)
  reifyBase (N s) = Name s
+ reifyBase (b1 :.: b2) = (b1 %) ::: (b2 %)
 
 normalize :: Principal -> Principal
 normalize = reify . norm
@@ -354,6 +355,7 @@ jNormConf (p1 :\/ p2) =
   jNormConf p1 `jDisj` jNormConf p2
 jNormConf ((:→) p) = jNormConf p
 jNormConf ((:←) _) = jBot
+jNormConf (p1 ::: p2) = confidentiality $ normOwnsJ (norm p1) (jNormConf p2)
 
 jNormInt :: Principal -> J
 jNormInt (:⊤) = jTop
@@ -365,6 +367,7 @@ jNormInt (p1 :\/ p2) =
   jNormInt p1 `jConj` jNormInt p2
 jNormInt ((:→) p) = jBot
 jNormInt ((:←) p) = jNormInt p
+jNormInt (p1 ::: p2) = integrity $ normOwnsJ (norm p1) (jNormInt p2)
 
 jConj :: J -> J -> J
 jConj (J ms1) (J ms2) = jSimplify (J $ ms1 `Set.union` ms2)
@@ -461,6 +464,9 @@ infixr 7 \/
 
 (←) :: (ToPrincipal a) => a -> Principal
 (←) a = (:←) (a %)
+
+(.:) :: (ToPrincipal a, ToPrincipal b) => a -> b -> Principal
+a .: b = (a %) ::: (b %)
 
 type FLAM = Principal
 
