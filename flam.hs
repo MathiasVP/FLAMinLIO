@@ -1,5 +1,5 @@
 {-# LANGUAGE FlexibleInstances, ViewPatterns, PostfixOperators, OverloadedStrings, MultiParamTypeClasses, ExplicitForAll, ScopedTypeVariables, LambdaCase, MonadComprehensions #-}
-module FLAM(Principal(..), (≽), (⊑), H(..), FLAM, normalize, bot, top, (%), (/|\), (\|/), (→), (←)) where
+module FLAM(Principal(..), (≽), (⊑), H(..), FLAM, FLAMIO, bot, top, (%), (/|\), (\|/), (→), (←)) where
 
 import LIO
 import TCB()
@@ -38,10 +38,6 @@ data Principal
 instance IsString Principal where
   fromString = Name
 
-instance SemiLattice Principal where
-  p ⊔ q = ((p :/\ q) :→) :/\ ((p :\/ q) :←)
-  p ⊓ q = ((p :\/ q) :→) :/\ ((p :/\ q) :←)
-
 newtype H = H { unH :: Set (Labeled Principal (Principal, Principal)) }
 
 type Trace = (Set (Principal, Principal), Int)
@@ -58,24 +54,24 @@ setFilterM f s = do
 
 (.≽.) :: Principal -> Principal -> ReaderT Trace (LIO H FLAM) Bool
 p .≽. q = do
-  (_, indent) <- ask
+  {-(_, indent) <- ask
   lift $ LIO . StateT $ \s -> do
     putStr $ replicate indent ' '
     putStrLn $ "Goal:     " ++ show p ++ " ≽ " ++ show q
-    return ((), s)
+    return ((), s)-}
   asks (Set.member (p, q) . view _1) >>= \case
     True -> do
-      lift $ LIO . StateT $ \s -> do
+      {-lift $ LIO . StateT $ \s -> do
         putStr $ replicate indent ' '
         putStrLn $ "Cycle:    " ++ show p ++ " ≽ " ++ show q
-        return ((), s)
+        return ((), s)-}
       return False
     False -> do
       r <- local (\(tr, n) -> (Set.insert (p, q) tr, n + 2)) $ p .≽ q
-      lift $ LIO . StateT $ \s -> do
+      {-lift $ LIO . StateT $ \s -> do
         putStr $ replicate indent ' '
         putStrLn $ "Finished: " ++ show p ++ " ≽ " ++ show q ++ " is " ++ show r
-        return ((), s)
+        return ((), s)-}
       return r
 
 bot_ :: (Principal, Principal) -> ReaderT Trace (LIO H FLAM) Bool
@@ -214,6 +210,10 @@ p .≽ q =
 
 (≽) :: Principal -> Principal -> LIO H FLAM Bool
 p ≽ q = run (p .≽ q)
+
+instance SemiLattice Principal where
+  p ⊔ q = normalize $ ((p :/\ q) :→) :/\ ((p :\/ q) :←)
+  p ⊓ q = normalize $ ((p :\/ q) :→) :/\ ((p :/\ q) :←)
 
 instance Label (ReaderT Trace) H Principal where
   p .⊑ q = normalize ((q :→) :/\ (p :←)) .≽. normalize ((p :→) :/\ (q :←))
@@ -468,3 +468,5 @@ bot = (:→) (:⊥) :/\ (:←) (:⊤)
 
 top :: Principal
 top = (:→) (:⊤) :/\ (:←) (:⊥)
+
+type FLAMIO = LIO H FLAM

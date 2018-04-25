@@ -64,9 +64,9 @@ leak secret = do
     when (s == 0) $ do
       del <- label top ((%) "alice", (%) "bob")
       setState $ H $ Set.singleton del
-  {- IMPORTANT: The toLabeled function computes a ⊑ to check if the current level of the
+  {- IMPORTANT: The toLabeled function does a ⊑ to check if the current level of the
                 computation above ``stayed below'' top, and this ⊑ actually raises the
-                current level differently depending on whether s is zero or not.
+                current level differently depending on whether s is zero or not:
                 When s is zero a delegation is added, and the ⊑ computation raises the
                 current level to bot ⊔ top = :⊤ doing this computation since it tries
                 to use this new delegation.
@@ -74,7 +74,7 @@ leak secret = do
                 keeps the current level at bot. -}
   l <- getLabel
   LIO . StateT $ \s -> do
-    print (normalize l)
+    print l
     return ((), s)
   return ()
 
