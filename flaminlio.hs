@@ -104,3 +104,6 @@ example_attack :: LIO H FLAM Bool
 example_attack = do
   -- Pretend we have a secret boolean coming in from somewhere
   use_attack (Labeled { _labeledLab = top, _labeledVal = True })
+
+example5 :: FLAMIO Bool
+example5 = (((:→) (:⊥)) :/\ ((:←) (:⊤))) ⊑ (((:→) (:⊤)) :/\ ((:←) (:⊥)))

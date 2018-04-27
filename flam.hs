@@ -1,10 +1,14 @@
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances, ViewPatterns, PostfixOperators, OverloadedStrings, MultiParamTypeClasses, ExplicitForAll, ScopedTypeVariables, LambdaCase, MonadComprehensions #-}
+{-# LANGUAGE FlexibleInstances, ViewPatterns, PostfixOperators, OverloadedStrings, MultiParamTypeClasses, ExplicitForAll, ScopedTypeVariables, LambdaCase, MonadComprehensions, GeneralizedNewtypeDeriving #-}
 module FLAM(Principal(..), (≽), (⊑), H(..), FLAM, FLAMIO, bot, top, (%), (/\), (\/), (→), (←), (.:)) where
 
 import LIO
 import TCB()
 import qualified Data.List as List
+import qualified Data.Map as Map
+import Data.Map(Map)
 import qualified Data.Set.Monad as Set
 import Data.Set.Monad(Set, (\\))
 import Data.Either
@@ -40,8 +44,41 @@ instance IsString Principal where
   fromString = Name
 
 newtype H = H { unH :: Set (Labeled Principal (Principal, Principal)) }
+  deriving (Ord, Eq)
 
 type Trace = (Set (Principal, Principal), Int)
+
+data L
+  = N String
+  | T
+  | B
+  | L :.: L
+  deriving (Eq, Ord, Show)
+
+newtype M = M { unM :: Set L } -- L₁ \/ L₂ \/ ... \/ Lₙ
+  deriving (Eq, Ord, Show)
+
+newtype J = J { unJ :: Set M } -- M₁ /\ M₂ /\ ... /\ Mₙ
+  deriving (Eq, Ord, Show)
+
+data JNF = JNF { confidentiality :: J, integrity :: J }
+  deriving (Show, Eq, Ord)
+
+{-
+Okay, this one needs some explanation.
+reachabilityCache:
+  A map from a set of principals (a unlabeled delegation set) to a set a pair of expanded delegation sets.
+queryCache:
+  A map from the FLAMIO state to a set of true queries of the form (p ≽ q)
+-}
+data Cache = Cache { _reachabilityCache :: Map (Set (Principal, Principal)) ((Set (J, J), Set (J, J))),
+                     _queryCache :: Map (BoundedLabel Principal) (Set (Principal, Principal)) }
+
+makeLenses ''Cache
+
+emptyCache :: Cache
+emptyCache = Cache { _reachabilityCache = Map.empty,
+                     _queryCache = Map.empty }
 
 setMapM :: (Ord a, Ord b, Monad m) => (a -> m b) -> Set a -> m (Set b)
 setMapM f s = do
@@ -53,83 +90,106 @@ setFilterM f s = do
   s' <- filterM f (Set.toList s)
   return $ Set.fromList s'
 
-(.≽.) :: (MonadLIO H FLAM m) => Principal -> Principal -> ReaderT Trace m Bool
+(.≽.) :: (MonadLIO H FLAM m) => Principal -> Principal -> Magic m Bool
 p .≽. q = do
   {-(_, indent) <- ask
-  lift $ LIO . StateT $ \s -> do
+  lift $ liftLIO $ LIO . StateT $ \s -> do
     putStr $ replicate indent ' '
     putStrLn $ "Goal:     " ++ show p ++ " ≽ " ++ show q
     return ((), s)-}
-  asks (Set.member (p, q) . view _1) >>= \case
-    True -> do
-      {-lift $ LIO . StateT $ \s -> do
-        putStr $ replicate indent ' '
-        putStrLn $ "Cycle:    " ++ show p ++ " ≽ " ++ show q
-        return ((), s)-}
-      return False
-    False -> do
-      r <- local (\(tr, n) -> (Set.insert (p, q) tr, n + 2)) $ p .≽ q
-      {-lift $ LIO . StateT $ \s -> do
-        putStr $ replicate indent ' '
-        putStrLn $ "Finished: " ++ show p ++ " ≽ " ++ show q ++ " is " ++ show r
-        return ((), s)-}
-      return r
+  curLab <- lift $ liftLIO getLabel
+  clrLab <- lift $ liftLIO $ getClearance
+  querycache <-
+    Map.lookup (BoundedLabel { _cur = curLab, _clearance = clrLab }) <$> gets (view queryCache) >>= \case
+    Just qcache -> return qcache
+    Nothing -> do
+      modify $ over queryCache (Map.insert (BoundedLabel { _cur = curLab, _clearance = clrLab }) Set.empty)
+      return Set.empty
 
-bot_ :: (MonadLIO H FLAM m) => (Principal, Principal) -> ReaderT Trace m Bool
+  case Set.member (p, q) querycache of
+    True -> return True
+    False -> do
+      asks (Set.member (p, q) . view _1) >>= \case
+        True -> return False -- Cycle!
+        False -> do
+          r <- Magic $ local (\(tr, n) -> (Set.insert (p, q) tr, n + 2)) $ unMagic (p .≽ q)
+          querycache' <- gets $ view queryCache
+          curLab' <- lift $ liftLIO getLabel
+          clrLab' <- lift $ liftLIO $ getClearance
+          when r $ do
+            unless (Map.member (BoundedLabel { _cur = curLab', _clearance = clrLab' }) querycache') $
+              fail "Expeced LIOST to be in query cache! (Monotonicity of query cache broken)"
+            modify $ over queryCache (Map.adjust (Set.insert (p, q)) (BoundedLabel { _cur = curLab', _clearance = clrLab' }))
+          return r
+
+bot_ :: (MonadLIO H FLAM m) => (Principal, Principal) -> Magic m Bool
 bot_ (_, (:⊥)) = return True
+bot_ (_, (((:→) (:⊥)) :/\ ((:←) (:⊥)))) = return True
 bot_ _ = return False
 
-top_ :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
+top_ :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
 top_ ((:⊤), _) = return True
+top_ ((((:→) (:⊤)) :/\ ((:←) (:⊤))), _) = return True
 top_ _ = return False
 
-refl :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
+refl :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
 refl (p, q) | p == q = return True
 refl _ = return False
 
-proj :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
+proj :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
 proj ((:→) p, (:→) q) = p .≽. q
 proj ((:←) p, (:←) q) = p .≽. q
 proj _ = return False
 
-projR :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
+projR :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
 projR (p, (:←) q) | p == q = return True
 projR (p, (:→) q) | p == q = return True
 projR _ = return False
 
-own1 :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
+own1 :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
 own1 (o ::: p, o' ::: p') = o .≽. o' <&&> p .≽. p'
 own1 _ = return False
 
-own2 :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
+own2 :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
 own2 (o ::: p, o' ::: p') = o .≽. o' <&&> p .≽. (o' ::: p')
 own2 _ = return False
 
-conjL :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
+conjL :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
 conjL (p1 :/\ p2, p) = p1 .≽. p <||> p2 .≽. p
 conjL _ = return False
 
-conjR :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
+conjR :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
 conjR (p, p1 :/\ p2) = p .≽. p1 <&&> p .≽. p2
 conjR _ = return False
 
-disjL :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
+disjL :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
 disjL (p1 :\/ p2, p) = p .≽. p1 <&&> p .≽. p2
 disjL _ = return False
 
-disjR :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
+disjR :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
 disjR (p, p1 :\/ p2) = p1 .≽. p <||> p2 .≽. p
 disjR _ = return False
 
-reach :: (Principal, Principal) -> Set (Principal, Principal) -> Bool
-reach (p, q) s =
-  (confidentiality pNorm, confidentiality qNorm) `Set.member` sconf &&
-  (integrity pNorm, integrity qNorm) `Set.member` sint
-  where pNorm = norm p
-        qNorm = norm q
-        sconf, sint :: Set (J, J)
-        (sconf, sint) = (transitive *** transitive) .
-                        (atomize *** atomize) . expand $ s
+reach :: MonadLIO H FLAM m => (Principal, Principal) -> Set (Principal, Principal) -> Magic m Bool
+reach (p, q) s = do
+  let pNorm = norm p
+      qNorm = norm q
+
+  cache <- gets $ view reachabilityCache
+  (sconf, sint) <- 
+    case Map.lookup s cache of
+      Just (sconf, sint) -> return (sconf, sint)
+      Nothing -> do
+        let sconf, sint :: Set (J, J)
+            (sconf, sint) = (transitive *** transitive) .
+                          (atomize *** atomize) . expand $ s
+        modify $ over reachabilityCache (Map.insert s (sconf, sint))
+        return (sconf, sint)
+  return $
+    (confidentiality pNorm, confidentiality qNorm) `Set.member` sconf &&
+    (integrity pNorm, integrity qNorm) `Set.member` sint
+        
+        
 
 {- Compute the expanded form of a delegation set -}
 expand :: Set (Principal, Principal) -> (Set (J, M), Set (J, M))
@@ -172,69 +232,48 @@ transitive s
               ps <- sequence [bs | M bs <- Set.toList ms]]
   where mkM = M . Set.singleton
 
-del :: MonadLIO H FLAM m => (Principal, Principal) -> ReaderT Trace m Bool
+del :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
 del (p, q) = do
   clr <- lift getClearance
   l <- lift getLabel
   h <- lift getState
-  {- We have to check labelOf lab ⊔ l instead of labelOf lab.
-     To see an example of why, consider the (minimal) example:
+  lift getStrategy >>=
+    anyM (\stratClr -> do
+             h' <- setFilterM (\lab -> labelOf lab ⊔ l .⊑ stratClr) >=>
+                   setMapM unlabel' $ (unH h)
+             reach (p, q) h')
 
-  setState (H $ Set.fromList [Labeled { _labeledLab = top,
-                                        _labeledVal = (Name "p", Name "q") }])
-  run $ (((:⊤) →) :/\ ((:⊤) ←)) .≽. (((:⊤) →) :/\ ((:⊥) ←))
-
-  or the example:
-
-  setState (H $ Set.fromList [Labeled { _labeledLab = top,
-                                        _labeledVal = (Name "p", Name "q") }])
-  run $ ((:→) (Name "p")) .≽. ((:→) (Name "q"))
--}
-  h' <- setFilterM (\lab -> labelOf lab ⊔ l .⊑ clr) >=>
-        setMapM (\lab -> unlabel' lab) $ (unH h)
-  if reach (p, q) h' then return True else return False
-  
-(.≽) :: MonadLIO H FLAM m => Principal -> Principal -> ReaderT Trace m Bool
+(.≽) :: MonadLIO H FLAM m => Principal -> Principal -> Magic m Bool
 p .≽ q =
   bot_ (p, q) <||>
-    top_ (p, q) <||>
-    refl (p, q) <||>
-    proj (p, q) <||>
-    projR (p, q) <||>
-    own1 (p, q) <||>
-    own2 (p, q) <||>
-    conjL (p, q) <||>
-    conjR (p, q) <||>
-    disjL (p, q) <||>
-    disjR (p, q) <||>
-    del (p, q)
+  top_ (p, q) <||>
+  refl (p, q) <||>
+  proj (p, q) <||>
+  projR (p, q) <||>
+  own1 (p, q) <||>
+  own2 (p, q) <||>
+  conjL (p, q) <||>
+  conjR (p, q) <||>
+  disjL (p, q) <||>
+  disjR (p, q) <||>
+  del (p, q)
 
 (≽) :: Principal -> Principal -> LIO H FLAM Bool
-p ≽ q = run (p .≽ q)
+p ≽ q = evalStateT (run (normalize p .≽. normalize q)) Map.empty
 
 instance SemiLattice Principal where
-  p ⊔ q = normalize $ ((p :/\ q) :→) :/\ ((p :\/ q) :←)
-  p ⊓ q = normalize $ ((p :\/ q) :→) :/\ ((p :/\ q) :←)
+  p ⊔ q = normalize ((p :/\ q) :→) :/\ normalize ((p :\/ q) :←)
+  p ⊓ q = normalize ((p :\/ q) :→) :/\ normalize ((p :/\ q) :←)
 
-instance Label (ReaderT Trace) H Principal where
+newtype Magic m a = Magic { unMagic :: ReaderT Trace (StateT Cache m) a }
+  deriving (Functor, Applicative, Monad, MonadReader Trace, MonadState Cache)
+
+instance MonadTrans Magic where
+  lift m = Magic (lift $ lift $ m)
+  
+instance Label Magic H Principal where
   p .⊑ q = normalize ((q :→) :/\ (p :←)) .≽. normalize ((p :→) :/\ (q :←))
-  run query = runReaderT query (Set.empty, 0)
-
-data L
-  = N String
-  | T
-  | B
-  | L :.: L
-  deriving (Eq, Ord, Show)
-
-newtype M = M { unM :: Set L } -- L₁ \/ L₂ \/ ... \/ Lₙ
-  deriving (Eq, Ord, Show)
-
-newtype J = J { unJ :: Set M } -- M₁ /\ M₂ /\ ... /\ Mₙ
-  deriving (Eq, Ord, Show)
-
-data JNF = JNF { confidentiality :: J, integrity :: J }
-  deriving (Show, Eq, Ord)
+  run query = evalStateT (runReaderT (unMagic query) (Set.empty, 0)) emptyCache
 
 mSingleton :: L -> M
 mSingleton b = M $ Set.singleton b

@@ -19,7 +19,9 @@ data BoundedLabel l = BoundedLabel { _cur :: l, _clearance :: l }
 
 makeLenses ''BoundedLabel
 
-newtype LIO s l a = LIO { unLIO :: StateT (BoundedLabel l, s) IO a }
+type Strategy l = [l]
+
+newtype LIO s l a = LIO { unLIO :: StateT (BoundedLabel l, s, Strategy l) IO a }
 
 class Monad m => MonadLIO s l m | m -> s l where
   liftLIO :: LIO s l a -> m a
@@ -52,7 +54,7 @@ instance Label t s l => Applicative (LIO s l) where
   pure = return
   (<*>) = ap
 
-instance Label t s l => MonadState (BoundedLabel l, s) (LIO s l) where
+instance Label t s l => MonadState (BoundedLabel l, s, Strategy l) (LIO s l) where
   get = LIO . StateT $ \s -> return (s, s)
   put s = LIO . StateT $ const (return ((), s))
   
@@ -76,13 +78,13 @@ raise :: (MonadLIO s l m, Label t s l, Monad (t m)) => l -> t m ()
 raise l = do
   l' <- lift $ liftLIO $ gets $ view _1
   s <- lift getState
-  b <- (view cur l') ⊔ l .⊑ view clearance l'
+  b <- view cur l' ⊔ l .⊑ view clearance l'
   unless b $
-    fail ("IFC violation: " ++
+    fail ("IFC violation (raise): " ++
            show (view cur l' ⊔ l) ++
            " ⊑ " ++ show (view clearance l'))
   lift $ liftLIO $ modify $ over (_1 . cur) ((⊔) l)
-
+  
 (<&&>) :: Monad m => m Bool -> m Bool -> m Bool
 (<&&>) m1 m2 =
   m1 >>= \case
@@ -105,7 +107,7 @@ label' l x = do
   lab <- lift $ liftLIO $ gets $ view _1
   b <- l ∈ lab
   unless b $
-    fail ("IFC violation: " ++
+    fail ("IFC violation (label): " ++
            show (view cur lab) ++
            " ⊑ " ++ show l ++
            " ⊑ " ++ show (view clearance lab))
@@ -116,7 +118,7 @@ label l a = run (label' l a)
 
 unlabel' :: (MonadLIO s l m, Label t s l, Monad (t m)) => Labeled l a -> t m a
 unlabel' lab = do
-  raise (view labeledLab lab)
+  raise (labelOf lab)
   return (view labeledVal lab)
 
 unlabel :: (MonadLIO s l m, Label t s l, Monad (t m)) => Labeled l a -> m a
@@ -129,12 +131,24 @@ toLabeled' l m = do
   l'' <- lift $ liftLIO $ gets $ view $ _1 . cur
   b <- l'' .⊑ l
   unless b $ do
-    fail ("IFC violation: " ++ show l'' ++ " ⊑ " ++ show l)
+    fail ("IFC violation (toLabeled): " ++ show l'' ++ " ⊑ " ++ show l)
   lift $ liftLIO $ modify $ (_1 .~ l')
   label' l res
 
 toLabeled :: (MonadLIO s l m, Label t s l, Monad (t m)) => l -> m a -> m (Labeled l a)
 toLabeled l x = run (toLabeled' l x)
+
+setStrategy' :: (MonadLIO s l m, Label t s l, Monad (t m)) => Strategy l -> t m ()
+setStrategy' ls = lift $ liftLIO $ modify $ (_3 .~ ls)
+
+setStrategy :: (MonadLIO s l m, Label t s l, Monad (t m)) => Strategy l -> m ()
+setStrategy ls = run (setStrategy' ls)
+
+getStrategy' :: (MonadLIO s l m, Label t s l, Monad (t m)) => t m (Strategy l)
+getStrategy' = lift $ liftLIO $ gets $ view _3
+
+getStrategy :: (MonadLIO s l m, Label t s l, Monad (t m)) => m (Strategy l)
+getStrategy = run getStrategy'
 
 labelOf :: Labeled l a -> l
 labelOf = view labeledLab
@@ -145,14 +159,14 @@ newRef' :: (MonadLIO s l m, Label t s l, Monad (t m)) => l -> a -> t m (LIORef l
 newRef' l x = do
   lab <- lift $ liftLIO $ gets $ view _1
   b <- l ∈ lab
-  lift . liftLIO . LIO . StateT $ \(lab, s) -> do
+  lift . liftLIO . LIO . StateT $ \(lab, s, strat) -> do
   unless b $
     fail ("IFC violation: " ++
            show (view cur lab) ++
            " ⊑ " ++ show l ++
            " ⊑ " ++ show (view clearance lab))
   r <- newIORef x
-  return (LIORef (Labeled {_labeledLab = l, _labeledVal = r}), (lab, s))
+  return (LIORef (Labeled {_labeledLab = l, _labeledVal = r}), (lab, s, strat))
 
 newRef :: (MonadLIO s l m, Label t s l, Monad (t m)) => l -> a -> m (LIORef l a)
 newRef l x = run (newRef' l x)
