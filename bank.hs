@@ -7,6 +7,7 @@ import qualified Data.Set.Monad as Set
 import qualified Data.Map as Map
 import Data.Map(Map)
 import Control.Monad.State
+import Control.Lens hiding ((+=), (-=))
 
 type User = String
 type Amount = Int
@@ -16,30 +17,23 @@ type Bank = Map User (Labeled Principal Amount)
 (+=) :: User -> Amount -> StateT Bank FLAMIO ()
 (+=) user amount =
   gets (Map.lookup user) >>= \case
-  Just account -> do
-    balance <- lift $ unlabel account
-    newBalance <- lift $ label (user %) (balance + amount)
-    modify (Map.insert user newBalance)
-  Nothing -> do
-    newBalance <- lift $ label (user %) amount
-    modify (Map.insert user newBalance)
+  Just Labeled{ _labeledLab = lab, _labeledVal = balance } ->
+    modify (Map.insert user Labeled { _labeledLab = lab, _labeledVal = balance + amount })
+  Nothing -> return ()
 
 (-=) :: User -> Amount -> StateT Bank FLAMIO ()
 u -= amount = u += (- amount)
 
-transfer :: Principal -> User -> User -> Amount -> StateT Bank FLAMIO ()
-transfer accountant from to amount =
-  lift ((accountant %) ≽ (from %)) >>= \case
-    True -> do
-      gets (Map.lookup from) >>= \case
-        Just account -> do
-          balance <- lift $ unlabel account
-          if balance >= amount then do
-            from -= amount
-            to += amount
-          else return ()
-        Nothing -> return ()
-    False -> return ()
+transfer :: User -> User -> Amount -> StateT Bank FLAMIO ()
+transfer from to amount =
+  gets (Map.lookup from) >>= \case
+    Just account -> do
+      balance <- lift $ unlabel account
+      if balance >= amount then do
+        from -= amount
+        to += amount
+      else return ()
+    Nothing -> return ()
 
 getBalance :: User -> StateT Bank FLAMIO Balance
 getBalance u =
@@ -59,6 +53,11 @@ addCustomer customer = do
   del <- lift $ label ((("Manager" \/ customer) ←) /\ ((:⊥) →))
     ("Bank" .: customer, ("Customer" %))
   lift $ setState $ H $ Set.insert del (unH h)
+
+createAccount :: String -> StateT Bank FLAMIO ()
+createAccount customer = do
+  account <- label (customer %) 100
+  modify $ Map.insert customer account
 
 addAccountManager :: String -> StateT Bank FLAMIO ()
 addAccountManager accountant = do
@@ -80,11 +79,26 @@ assignAccountManager manager customer = do
   del <- lift $ label (manager \/ customer) ((manager %), (customer %))
   lift $ setState $ H $ Set.insert del (unH h)
 
+asUser :: User -> StateT Bank FLAMIO () -> StateT Bank FLAMIO ()
+asUser u m = do
+  l <- getLabel
+  clr <- getClearance
+  lift $ LIO $ modify $ (_1 . clearance .~ (u %))
+  _ <- m
+  lift $ LIO $ modify $ (_1 . cur .~ l)
+  lift $ LIO $ modify $ (_1 . clearance .~ clr)
+
+runBank :: StateT Bank FLAMIO a -> FLAMIO (a, Bank)
+runBank = flip runStateT Map.empty
+
 evalBank :: StateT Bank FLAMIO a -> FLAMIO a
 evalBank = flip evalStateT Map.empty
 
-example :: FLAMIO Bool
-example = evalBank $ do
+execBank :: StateT Bank FLAMIO a -> FLAMIO Bank
+execBank = flip execStateT Map.empty
+
+example :: FLAMIO Bank
+example = execBank $ do
   lift $ liftLIO $ setStrategy []
   
   addRole "Customer"  
@@ -95,6 +109,10 @@ example = evalBank $ do
   addCustomer "Chloe"
   addCustomer "Charlotte"
 
+  createAccount "Charlie"
+  createAccount "Chloe"
+  createAccount "Charlotte"
+
   addAccountManager "Matt"
   addAccountManager "Michael"
   
@@ -104,17 +122,32 @@ example = evalBank $ do
   assignAccountManager "Michael" "Chloe"
   assignAccountManager "Michael" "Charlotte"
 
-  lift $ liftLIO $ setStrategy [("Matt" %)]
-  b <- ("Charlie" →) ⊑ ("Matt" →)
+  -- Matt is Charlie's account manager, so he can see the amount of money on Charlie's account
+  liftLIO $ setStrategy [("Matt" %)]
+  asUser "Matt" $ do
+    Map.lookup "Charlie" <$> get >>= \case
+      Just amount -> do
+        a <- unlabel amount
+        {- ... -}
+        return ()
+      Nothing -> return ()
 
-  l <- lift $ liftLIO $ getLabel
+  -- Chloe is allowed to wire money from her own account to Charlotte
+  liftLIO $ setStrategy []
+  asUser "Chloe" $ do
+    transfer "Chloe" "Charlotte" 10
 
-  lift $ liftLIO $ LIO . StateT $ \st -> do
-    print l
-    return ((), st)
-  return b
+  -- Michael is the manager of Chloe's account, so he can move money from Chloe to Charlie
+  liftLIO $ setStrategy [("Michael" %)]
+  asUser "Michael" $ do
+    transfer "Chloe" "Charlie" 20
 
-runExample :: IO Bool
+  -- Charlie is not allowed to transfer money from Charlotte to his own account!
+  liftLIO $ setStrategy []
+  asUser "Charlie" $ do
+    transfer "Charlotte" "Charlie" 30
+
+runExample :: IO Bank
 runExample =
   evalStateT (unLIO example)
   (BoundedLabel { _cur = bot, _clearance = top }, H Set.empty, [])

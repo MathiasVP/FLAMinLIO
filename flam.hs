@@ -7,7 +7,7 @@ module FLAM(Principal(..), (≽), (⊑), H(..), FLAM, FLAMIO, bot, top, (%), (/\
 import LIO
 import TCB()
 import qualified Data.List as List
-import qualified Data.Map as Map
+import qualified Data.Map.Strict as Map
 import Data.Map(Map)
 import qualified Data.Set.Monad as Set
 import Data.Set.Monad(Set, (\\))
@@ -19,7 +19,7 @@ import qualified Data.Maybe as Maybe
 import Control.Monad.Reader
 import Control.Monad.Trans.Maybe
 import Control.Arrow
-import Control.Monad.Loops
+import Control.Monad.Extra
 import Control.Lens.Tuple
 import Control.Lens
 
@@ -80,15 +80,13 @@ emptyCache :: Cache
 emptyCache = Cache { _reachabilityCache = Map.empty,
                      _queryCache = Map.empty }
 
-setMapM :: (Ord a, Ord b, Monad m) => (a -> m b) -> Set a -> m (Set b)
-setMapM f s = do
-  s' <- mapM f (Set.toList s)
-  return $ Set.fromList s'
-
-setFilterM :: (Ord a, Monad m) => (a -> m Bool) -> Set a -> m (Set a)
-setFilterM f s = do
-  s' <- filterM f (Set.toList s)
-  return $ Set.fromList s'
+setFilterMapM :: (Ord a, Ord b, Monad m) => (a -> m (Maybe b)) -> Set a -> m (Set b)
+setFilterMapM f s = run s Set.empty
+  where run (setview -> Nothing) s = return s
+        run (setview -> Just (a, as)) s =
+          f a >>= \case
+            Nothing -> run as s
+            Just b -> run as (Set.insert b s)
 
 (.≽.) :: (MonadLIO H FLAM m) => Principal -> Principal -> Magic m Bool
 p .≽. q = do
@@ -112,7 +110,7 @@ p .≽. q = do
       asks (Set.member (p, q) . view _1) >>= \case
         True -> return False -- Cycle!
         False -> do
-          r <- Magic $ local (\(tr, n) -> (Set.insert (p, q) tr, n + 2)) $ unMagic (p .≽ q)
+          r <- Magic $ local (\(tr, n) -> (Set.insert (p, q) tr, n + 1)) $ unMagic (p .≽ q)
           querycache' <- gets $ view queryCache
           curLab' <- lift $ liftLIO getLabel
           clrLab' <- lift $ liftLIO $ getClearance
@@ -239,8 +237,10 @@ del (p, q) = do
   h <- lift getState
   lift getStrategy >>=
     anyM (\stratClr -> do
-             h' <- setFilterM (\lab -> labelOf lab ⊔ l .⊑ stratClr) >=>
-                   setMapM unlabel' $ (unH h)
+             h' <- setFilterMapM (\lab ->
+                                  labelOf lab ⊔ l .⊑ stratClr >>= \case
+                                    True -> Just <$> unlabel' lab
+                                    False -> return Nothing) $ (unH h)
              reach (p, q) h')
 
 (.≽) :: MonadLIO H FLAM m => Principal -> Principal -> Magic m Bool
