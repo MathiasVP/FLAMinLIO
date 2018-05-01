@@ -1,8 +1,8 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances, ViewPatterns, PostfixOperators, OverloadedStrings, MultiParamTypeClasses, ExplicitForAll, ScopedTypeVariables, LambdaCase, MonadComprehensions, GeneralizedNewtypeDeriving #-}
-module FLAM(Principal(..), (≽), (⊑), H(..), FLAM, FLAMIO, bot, top, (%), (/\), (\/), (→), (←), (.:)) where
+{-# LANGUAGE FlexibleInstances, ViewPatterns, PostfixOperators, OverloadedStrings, MultiParamTypeClasses, ExplicitForAll, ScopedTypeVariables, LambdaCase, MonadComprehensions, GeneralizedNewtypeDeriving, UndecidableInstances #-}
+module FLAM(Principal(..), (≽), (⊑), H(..), FLAM, FLAMIO, bot, top, (%), (/\), (\/), (→), (←), (.:), addDelegate, removeDelegate) where
 
 import LIO
 import TCB()
@@ -39,9 +39,11 @@ data Principal
   | (:←) Principal
   | Principal ::: Principal
   deriving (Eq, Ord, Show)
-  
+
+{-
 instance IsString Principal where
   fromString = Name
+-}
 
 newtype H = H { unH :: Set (Labeled Principal (Principal, Principal)) }
   deriving (Ord, Eq)
@@ -71,8 +73,10 @@ reachabilityCache:
 queryCache:
   A map from the FLAMIO state to a set of true queries of the form (p ≽ q)
 -}
-data Cache = Cache { _reachabilityCache :: Map (Set (Principal, Principal)) ((Set (J, J), Set (J, J))),
-                     _queryCache :: Map (BoundedLabel Principal) (Set (Principal, Principal)) }
+type QueryCacheResult = Map (Principal, Principal) Principal
+type QueryCache = Map (Principal, Principal) QueryCacheResult
+type ReachabilityCache = Map (Set (Principal, Principal)) ((Set (J, J), Set (J, J)))
+data Cache = Cache { _reachabilityCache :: ReachabilityCache, _queryCache :: QueryCache }
 
 makeLenses ''Cache
 
@@ -88,36 +92,51 @@ setFilterMapM f s = run s Set.empty
             Nothing -> run as s
             Just b -> run as (Set.insert b s)
 
+getQueryCache :: MonadLIO H FLAM m => Principal -> Principal -> Magic m QueryCacheResult
+getQueryCache cur clr =
+  Map.lookup (cur, clr) <$> gets (view queryCache) >>= \case
+    Just qcache -> do
+      return qcache
+    Nothing -> do
+      modify $ over queryCache (Map.insert (cur, clr) Map.empty)
+      return Map.empty
+
 (.≽.) :: (MonadLIO H FLAM m) => Principal -> Principal -> Magic m Bool
 p .≽. q = do
   {-(_, indent) <- ask
-  lift $ liftLIO $ LIO . StateT $ \s -> do
+  liftLIO $ LIO $ StateT $ \s -> do
     putStr $ replicate indent ' '
     putStrLn $ "Goal:     " ++ show p ++ " ≽ " ++ show q
     return ((), s)-}
   curLab <- lift $ liftLIO getLabel
   clrLab <- lift $ liftLIO $ getClearance
-  querycache <-
-    Map.lookup (BoundedLabel { _cur = curLab, _clearance = clrLab }) <$> gets (view queryCache) >>= \case
-    Just qcache -> return qcache
+  querycache <- getQueryCache curLab clrLab
+  case Map.lookup (p, q) querycache of
+    Just curlab' -> do
+      {-liftLIO $ LIO $ StateT $ \s -> do
+        putStr $ replicate indent ' '
+        putStrLn $ "Cached: " ++ show p ++ " ≽ " ++ show q ++ " is True"
+        return ((), s)-}
+      lift $ liftLIO $ LIO $ modify' $ (_1 . cur) .~ curlab'
+      return True
     Nothing -> do
-      modify $ over queryCache (Map.insert (BoundedLabel { _cur = curLab, _clearance = clrLab }) Set.empty)
-      return Set.empty
-
-  case Set.member (p, q) querycache of
-    True -> return True
-    False -> do
-      asks (Set.member (p, q) . view _1) >>= \case
-        True -> return False -- Cycle!
+      asks (Set.member (p, q) . fst) >>= \case
+        True -> do
+          {-liftLIO $ LIO $ StateT $ \s -> do
+            putStr $ replicate indent ' '
+            putStrLn $ "Cycle:    " ++ show p ++ " ≽ " ++ show q
+            return ((), s)-}
+          return False -- Cycle!
         False -> do
-          r <- Magic $ local (\(tr, n) -> (Set.insert (p, q) tr, n + 1)) $ unMagic (p .≽ q)
-          querycache' <- gets $ view queryCache
-          curLab' <- lift $ liftLIO getLabel
-          clrLab' <- lift $ liftLIO $ getClearance
+          r <- Magic $ local (Set.insert (p, q) *** (+ 2)) $ unMagic (p .≽ q)
           when r $ do
-            unless (Map.member (BoundedLabel { _cur = curLab', _clearance = clrLab' }) querycache') $
-              fail "Expeced LIOST to be in query cache! (Monotonicity of query cache broken)"
-            modify $ over queryCache (Map.adjust (Set.insert (p, q)) (BoundedLabel { _cur = curLab', _clearance = clrLab' }))
+            curLab' <- lift $ liftLIO getLabel
+            clrLab' <- lift $ liftLIO $ getClearance
+            modify $ over queryCache (Map.adjust (Map.insert (p, q) curLab') (curLab, clrLab))
+          {-liftLIO $ LIO $ StateT $ \s -> do
+            putStr $ replicate indent ' '
+            putStrLn $ "Finished: " ++ show p ++ " ≽ " ++ show q ++ " is " ++ show r
+            return ((), s)-}
           return r
 
 bot_ :: (MonadLIO H FLAM m) => (Principal, Principal) -> Magic m Bool
@@ -235,6 +254,7 @@ del (p, q) = do
   clr <- lift getClearance
   l <- lift getLabel
   h <- lift getState
+  strat <- lift getStrategy
   lift getStrategy >>=
     anyM (\stratClr -> do
              h' <- setFilterMapM (\lab ->
@@ -258,8 +278,8 @@ p .≽ q =
   disjR (p, q) <||>
   del (p, q)
 
-(≽) :: Principal -> Principal -> LIO H FLAM Bool
-p ≽ q = evalStateT (run (normalize p .≽. normalize q)) Map.empty
+(≽) :: MonadLIO H FLAM m => (ToPrincipal a, ToPrincipal b) => a -> b -> m Bool
+p ≽ q = evalStateT (run (normalize (p %) .≽. normalize (q %))) Map.empty
 
 instance SemiLattice Principal where
   p ⊔ q = normalize ((p :/\ q) :→) :/\ normalize ((p :\/ q) :←)
@@ -275,6 +295,12 @@ instance Label Magic H Principal where
   p .⊑ q = normalize ((q :→) :/\ (p :←)) .≽. normalize ((p :→) :/\ (q :←))
   run query = evalStateT (runReaderT (unMagic query) (Set.empty, 0)) emptyCache
 
+instance MonadLIO s l m => MonadLIO s l (ReaderT r m) where
+  liftLIO x = lift (liftLIO x)
+
+instance (Label t s l, MonadLIO s l m) => MonadLIO s l (Magic m) where
+  liftLIO x = Magic (liftLIO x)
+  
 mSingleton :: L -> M
 mSingleton b = M $ Set.singleton b
 
@@ -516,3 +542,15 @@ top :: Principal
 top = (:→) (:⊤) :/\ (:←) (:⊥)
 
 type FLAMIO = LIO H FLAM
+
+addDelegate :: MonadLIO H FLAM m => (Principal, Principal) -> Principal -> m ()
+addDelegate (p, q) l = do
+  h <- liftLIO getState
+  lab <- label l (p, q)
+  liftLIO $ setState (H $ Set.insert lab (unH h))
+
+removeDelegate :: MonadLIO H FLAM m => (Principal, Principal) -> Principal -> m ()
+removeDelegate (p, q) l = do
+  h <- liftLIO getState
+  lab <- label l (p, q)
+  liftLIO $ setState (H $ Set.delete lab (unH h))

@@ -9,50 +9,51 @@ import Data.Map(Map)
 import Control.Monad.State
 import Control.Lens hiding ((+=), (-=))
 
+type Customer = String
 type User = String
 type Amount = Int
 type Balance = Int
-type Bank = Map User (Labeled Principal Amount)
+type Bank = Map Customer (Labeled Principal Balance)
 
-(+=) :: User -> Amount -> StateT Bank FLAMIO ()
+(+=) :: Customer -> Amount -> StateT Bank FLAMIO ()
 (+=) user amount =
   gets (Map.lookup user) >>= \case
   Just Labeled{ _labeledLab = lab, _labeledVal = balance } ->
     modify (Map.insert user Labeled { _labeledLab = lab, _labeledVal = balance + amount })
   Nothing -> return ()
 
-(-=) :: User -> Amount -> StateT Bank FLAMIO ()
+(-=) :: Customer -> Amount -> StateT Bank FLAMIO ()
 u -= amount = u += (- amount)
 
-transfer :: User -> User -> Amount -> StateT Bank FLAMIO ()
+transfer :: Customer -> Customer -> Amount -> StateT Bank FLAMIO ()
 transfer from to amount =
   gets (Map.lookup from) >>= \case
     Just account -> do
       balance <- lift $ unlabel account
-      if balance >= amount then do
+      isPremium <- from ≽ "Premium"
+      liftLIO $ LIO $ lift $ putStrLn $ from ++ ": " ++ show isPremium
+      if balance >= amount || isPremium then do
         from -= amount
         to += amount
       else return ()
     Nothing -> return ()
 
-getBalance :: User -> StateT Bank FLAMIO Balance
+getBalance :: Customer -> StateT Bank FLAMIO Balance
 getBalance u =
   gets (Map.lookup u) >>= \case
     Just account -> lift $ unlabel account
     Nothing -> return 0
 
 addRole :: String -> StateT Bank FLAMIO ()
-addRole role = do
-  h <- lift $ getState
-  del <- lift $ label bot (("Bank" %), (role %))
-  lift $ setState $ H $ Set.insert del (unH h)
+addRole role = addDelegate (("Bank" %), (role %)) bot
 
 addCustomer :: String -> StateT Bank FLAMIO ()
-addCustomer customer = do
-  h <- lift $ getState
-  del <- lift $ label ((("Manager" \/ customer) ←) /\ ((:⊥) →))
-    ("Bank" .: customer, ("Customer" %))
-  lift $ setState $ H $ Set.insert del (unH h)
+addCustomer customer =
+  addDelegate ("Bank" .: customer, ("Customer" %)) ((("Manager" \/ customer) ←) /\ ((:⊥) →))
+
+addPremium :: String -> StateT Bank FLAMIO ()
+addPremium prem =
+  addDelegate ("Bank" .: prem, ("Premium" %)) ((("Manager" \/ prem) ←) /\ ("Premium" →))
 
 createAccount :: String -> StateT Bank FLAMIO ()
 createAccount customer = do
@@ -60,24 +61,16 @@ createAccount customer = do
   modify $ Map.insert customer account
 
 addAccountManager :: String -> StateT Bank FLAMIO ()
-addAccountManager accountant = do
-  h <- lift $ getState
-  del <- lift $ label ((("Director" \/ accountant) ←) /\ ((:⊥) →))
-    ("Bank" .: accountant, ("Manager" %))
-  lift $ setState $ H $ Set.insert del (unH h)
+addAccountManager accountant =
+  addDelegate ("Bank" .: accountant, ("Manager" %)) ((("Director" \/ accountant) ←) /\ ((:⊥) →))
 
 addDirector :: String -> StateT Bank FLAMIO ()
 addDirector dir = do
-  h <- lift $ getState
-  del <- lift $ label (("Bank" ←) \/ ((:⊥) →))
-    ("Bank" .: dir, ("Director" %))
-  lift $ setState $ H $ Set.insert del (unH h)
+  addDelegate ("Bank" .: dir, ("Director" %)) (("Bank" ←) \/ ((:⊥) →))
 
 assignAccountManager :: String -> String -> StateT Bank FLAMIO () 
 assignAccountManager manager customer = do
-  h <- lift $ getState
-  del <- lift $ label (manager \/ customer) ((manager %), (customer %))
-  lift $ setState $ H $ Set.insert del (unH h)
+  addDelegate ((manager %), (customer %)) (manager \/ customer)
 
 asUser :: User -> StateT Bank FLAMIO () -> StateT Bank FLAMIO ()
 asUser u m = do
@@ -104,14 +97,17 @@ example = execBank $ do
   addRole "Customer"  
   addRole "Manager"
   addRole "Director"
+  addRole "Premium"
 
   addCustomer "Charlie"
   addCustomer "Chloe"
   addCustomer "Charlotte"
+  addPremium "Paige"
 
   createAccount "Charlie"
   createAccount "Chloe"
   createAccount "Charlotte"
+  createAccount "Paige"
 
   addAccountManager "Matt"
   addAccountManager "Michael"
@@ -121,6 +117,7 @@ example = execBank $ do
   assignAccountManager "Matt" "Charlie"
   assignAccountManager "Michael" "Chloe"
   assignAccountManager "Michael" "Charlotte"
+  assignAccountManager "Matt" "Paige"
 
   -- Matt is Charlie's account manager, so he can see the amount of money on Charlie's account
   liftLIO $ setStrategy [("Matt" %)]

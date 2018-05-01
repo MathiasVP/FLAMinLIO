@@ -6,8 +6,8 @@ import qualified Data.Set.Monad as Set
 import Data.Set.Monad(Set)
 import Control.Monad.State
 
-withClearance :: Principal -> (BoundedLabel FLAM, H)
-withClearance p = (BoundedLabel { _cur = bot, _clearance = p }, H Set.empty)
+withClearance :: Principal -> (BoundedLabel FLAM, H, Strategy Principal)
+withClearance p = (BoundedLabel { _cur = bot, _clearance = p }, H Set.empty, [])
 
 example :: LIO H FLAM Bool
 example = do
@@ -44,46 +44,18 @@ example4 = do
   ((:⊤) →) :/\ ((:⊤) ←) ≽ (((:⊤) →) :/\ ((:⊥) ←))
 
 example_implicit :: Labeled FLAM Bool -> LIO H FLAM Bool
-example_implicit x = do
-  b <- unlabel x
-  when b $ do
-    h <- getState
-    d <- label (labelOf x) (("alice" %), ("bob" %))
-    setState $ H (Set.insert d (unH h))
+example_implicit secret = do
+  _ <- toLabeled top $ do
+    s <- unlabel secret
+    when s $ do
+      addDelegate (("alice" %), ("bob" %)) bot
   (%) "alice" ≽ (%) "bob"
 
 example_implicit2 :: LIO H FLAM Bool
 example_implicit2 = do
-  s <- label ("alice" \/ "bob") True
+  setStrategy [bot]
+  s <- label top False
   example_implicit s
-
-leak :: Labeled FLAM Int -> LIO H FLAM ()
-leak secret = do
-  _ <- toLabeled top $ do
-    s <- unlabel secret
-    when (s == 0) $ do
-      del <- label top ((%) "alice", (%) "bob")
-      setState $ H $ Set.singleton del
-  {- IMPORTANT: The toLabeled function does a ⊑ to check if the current level of the
-                computation above ``stayed below'' top, and this ⊑ actually raises the
-                current level differently depending on whether s is zero or not:
-                When s is zero a delegation is added, and the ⊑ computation raises the
-                current level to bot ⊔ top = :⊤ doing this computation since it tries
-                to use this new delegation.
-                When s is non-zero no new delegation is added, and thus checking the ⊑
-                keeps the current level at bot. -}
-  l <- getLabel
-  LIO . StateT $ \s -> do
-    print l
-    return ((), s)
-  return ()
-
-leak2 :: LIO H FLAM Bool
-leak2 = do
-  secret <- label top 1
-  leak secret
-  l <- getLabel
-  (l →) ⊑ ((:⊥) →)
 
 {- The following example demonstrates how an attacker can add a "bad" delegation
    to circumvent the IFC -}
