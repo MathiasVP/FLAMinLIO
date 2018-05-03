@@ -43,6 +43,23 @@ example4 = do
   setState (H $ Set.fromList [pq])
   ((:⊤) →) :/\ ((:⊤) ←) ≽ (((:⊤) →) :/\ ((:⊥) ←))
 
+-- Bad use of setState can leak!
+example_implicit_bad :: Labeled FLAM Bool -> LIO H FLAM Bool
+example_implicit_bad secret = do
+  _ <- toLabeled top $ do
+    lab <- label bot (("alice" %), ("bob" %))
+    s <- unlabel secret
+    when s $ do
+      setState (H $ Set.fromList [lab])
+  (%) "alice" ≽ (%) "bob"
+
+example_implicit2_bad :: LIO H FLAM Bool
+example_implicit2_bad = do
+  setStrategy [bot]
+  s <- label top False
+  example_implicit_bad s
+
+-- We can fix this by using the addDelegate function instead
 example_implicit :: Labeled FLAM Bool -> LIO H FLAM Bool
 example_implicit secret = do
   _ <- toLabeled top $ do
@@ -54,7 +71,7 @@ example_implicit secret = do
 example_implicit2 :: LIO H FLAM Bool
 example_implicit2 = do
   setStrategy [bot]
-  s <- label top False
+  s <- label top True
   example_implicit s
 
 {- The following example demonstrates how an attacker can add a "bad" delegation

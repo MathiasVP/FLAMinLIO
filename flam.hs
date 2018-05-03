@@ -1,7 +1,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances, ViewPatterns, PostfixOperators, OverloadedStrings, MultiParamTypeClasses, ExplicitForAll, ScopedTypeVariables, LambdaCase, MonadComprehensions, GeneralizedNewtypeDeriving, UndecidableInstances #-}
+{-# LANGUAGE FlexibleInstances, ViewPatterns, PostfixOperators, MultiParamTypeClasses, ExplicitForAll, ScopedTypeVariables, LambdaCase, MonadComprehensions, GeneralizedNewtypeDeriving, UndecidableInstances #-}
 module FLAM(Principal(..), (≽), (⊑), H(..), FLAM, FLAMIO, bot, top, (%), (/\), (\/), (→), (←), (.:), addDelegate, removeDelegate) where
 
 import LIO
@@ -9,8 +9,10 @@ import TCB()
 import qualified Data.List as List
 import qualified Data.Map.Strict as Map
 import Data.Map(Map)
-import qualified Data.Set.Monad as Set
-import Data.Set.Monad(Set, (\\))
+import qualified Data.POMap.Strict as POMap
+import Data.POMap.Strict(POMap)
+import qualified Data.Set as Set
+import Data.Set(Set, (\\))
 import Data.Either
 import Data.String
 import Control.Monad.State
@@ -19,9 +21,10 @@ import qualified Data.Maybe as Maybe
 import Control.Monad.Reader
 import Control.Monad.Trans.Maybe
 import Control.Arrow
-import Control.Monad.Extra
 import Control.Lens.Tuple
 import Control.Lens
+import Algebra.PartialOrd
+import Control.Monad.Extra
 
 listview :: Ord a => Set a -> [a]
 listview = Set.toList
@@ -40,15 +43,10 @@ data Principal
   | Principal ::: Principal
   deriving (Eq, Ord, Show)
 
-{-
-instance IsString Principal where
-  fromString = Name
--}
-
 newtype H = H { unH :: Set (Labeled Principal (Principal, Principal)) }
   deriving (Ord, Eq)
 
-type Trace = (Set (Principal, Principal), Int)
+type Trace = Set (Principal, Principal)
 
 data L
   = N String
@@ -66,15 +64,8 @@ newtype J = J { unJ :: Set M } -- M₁ /\ M₂ /\ ... /\ Mₙ
 data JNF = JNF { confidentiality :: J, integrity :: J }
   deriving (Show, Eq, Ord)
 
-{-
-Okay, this one needs some explanation.
-reachabilityCache:
-  A map from a set of principals (a unlabeled delegation set) to a set a pair of expanded delegation sets.
-queryCache:
-  A map from the FLAMIO state to a set of true queries of the form (p ≽ q)
--}
-type QueryCacheResult = Map (Principal, Principal) Principal
-type QueryCache = Map (Principal, Principal) QueryCacheResult
+type QueryCacheResult = (POMap (Set (Principal, Principal)) Principal, POMap (Set (Principal, Principal)) Principal)
+type QueryCache = Map (Principal, Principal, Principal) QueryCacheResult
 type ReachabilityCache = Map (Set (Principal, Principal)) ((Set (J, J), Set (J, J)))
 data Cache = Cache { _reachabilityCache :: ReachabilityCache, _queryCache :: QueryCache }
 
@@ -85,58 +76,59 @@ emptyCache = Cache { _reachabilityCache = Map.empty,
                      _queryCache = Map.empty }
 
 setFilterMapM :: (Ord a, Ord b, Monad m) => (a -> m (Maybe b)) -> Set a -> m (Set b)
-setFilterMapM f s = run s Set.empty
-  where run (setview -> Nothing) s = return s
-        run (setview -> Just (a, as)) s =
+setFilterMapM f s = visit s Set.empty
+  where visit (setview -> Nothing) s = return s
+        visit (setview -> Just (a, as)) s =
           f a >>= \case
-            Nothing -> run as s
-            Just b -> run as (Set.insert b s)
+            Nothing -> visit as s
+            Just b -> visit as (Set.insert b s)
 
-getQueryCache :: MonadLIO H FLAM m => Principal -> Principal -> Magic m QueryCacheResult
-getQueryCache cur clr =
-  Map.lookup (cur, clr) <$> gets (view queryCache) >>= \case
-    Just qcache -> do
-      return qcache
+querycache :: MonadLIO H FLAM m => Principal -> Principal -> Principal -> Magic m QueryCacheResult
+querycache cur p q = do
+  Map.lookup (cur, p, q) <$> gets (view queryCache) >>= \case
+    Just (trueSet, falseSet) -> return (trueSet, falseSet)
     Nothing -> do
-      modify $ over queryCache (Map.insert (cur, clr) Map.empty)
-      return Map.empty
+      modify $ over queryCache $ Map.insert (cur, p, q) (POMap.empty, POMap.empty)
+      return (POMap.empty, POMap.empty)
+
+searchCache :: MonadLIO H FLAM m => Principal -> Principal -> Magic m (Maybe Bool)
+searchCache p q = do
+  tr <- asks fst
+  curLab <- liftLIO getLabel
+  (truecache, falsecache) <- querycache curLab p q
+  case POMap.lookupGE tr truecache of
+    (_, cur'):_ -> do
+      liftLIO $ modify $ _1 . cur .~ cur'
+      return $ Just True
+    [] ->
+      case POMap.lookupLE tr falsecache of
+        (_, cur'):_ -> do
+          liftLIO $ modify $ _1 . cur .~ cur'
+          return $ Just False
+        [] -> return Nothing
+
+insertCacheValue :: MonadLIO H FLAM m => Principal -> Principal -> Principal -> Bool -> Magic m ()
+insertCacheValue cur p q b = do
+  tr <- asks fst
+  cur' <- liftLIO getLabel
+  (truecache, falsecache) <- querycache p q cur
+  if b then
+    modify $ over queryCache $ Map.insert (cur, p, q) (POMap.insert tr cur' truecache, falsecache)
+  else modify $ over queryCache $ Map.insert (cur, p, q) (truecache, POMap.insert tr cur' falsecache)
 
 (.≽.) :: (MonadLIO H FLAM m) => Principal -> Principal -> Magic m Bool
 p .≽. q = do
-  {-(_, indent) <- ask
-  liftLIO $ LIO $ StateT $ \s -> do
-    putStr $ replicate indent ' '
-    putStrLn $ "Goal:     " ++ show p ++ " ≽ " ++ show q
-    return ((), s)-}
-  curLab <- lift $ liftLIO getLabel
-  clrLab <- lift $ liftLIO $ getClearance
-  querycache <- getQueryCache curLab clrLab
-  case Map.lookup (p, q) querycache of
-    Just curlab' -> do
-      {-liftLIO $ LIO $ StateT $ \s -> do
-        putStr $ replicate indent ' '
-        putStrLn $ "Cached: " ++ show p ++ " ≽ " ++ show q ++ " is True"
-        return ((), s)-}
-      lift $ liftLIO $ LIO $ modify' $ (_1 . cur) .~ curlab'
-      return True
-    Nothing -> do
+  curLab <- liftLIO getLabel
+  searchCache p q >>= \case
+    Just b -> return b
+    Nothing ->
       asks (Set.member (p, q) . fst) >>= \case
         True -> do
-          {-liftLIO $ LIO $ StateT $ \s -> do
-            putStr $ replicate indent ' '
-            putStrLn $ "Cycle:    " ++ show p ++ " ≽ " ++ show q
-            return ((), s)-}
+          insertCacheValue curLab p q False
           return False -- Cycle!
         False -> do
           r <- Magic $ local (Set.insert (p, q) *** (+ 2)) $ unMagic (p .≽ q)
-          when r $ do
-            curLab' <- lift $ liftLIO getLabel
-            clrLab' <- lift $ liftLIO $ getClearance
-            modify $ over queryCache (Map.adjust (Map.insert (p, q) curLab') (curLab, clrLab))
-          {-liftLIO $ LIO $ StateT $ \s -> do
-            putStr $ replicate indent ' '
-            putStrLn $ "Finished: " ++ show p ++ " ≽ " ++ show q ++ " is " ++ show r
-            return ((), s)-}
+          insertCacheValue curLab p q r
           return r
 
 bot_ :: (MonadLIO H FLAM m) => (Principal, Principal) -> Magic m Bool
@@ -180,11 +172,11 @@ conjR (p, p1 :/\ p2) = p .≽. p1 <&&> p .≽. p2
 conjR _ = return False
 
 disjL :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
-disjL (p1 :\/ p2, p) = p .≽. p1 <&&> p .≽. p2
+disjL (p1 :\/ p2, p) = p1 .≽. p <&&> p2 .≽. p
 disjL _ = return False
 
 disjR :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
-disjR (p, p1 :\/ p2) = p1 .≽. p <||> p2 .≽. p
+disjR (p, p1 :\/ p2) = p .≽. p1 <||> p .≽. p2
 disjR _ = return False
 
 reach :: MonadLIO H FLAM m => (Principal, Principal) -> Set (Principal, Principal) -> Magic m Bool
@@ -206,7 +198,6 @@ reach (p, q) s = do
     (confidentiality pNorm, confidentiality qNorm) `Set.member` sconf &&
     (integrity pNorm, integrity qNorm) `Set.member` sint
         
-        
 
 {- Compute the expanded form of a delegation set -}
 expand :: Set (Principal, Principal) -> (Set (J, M), Set (J, M))
@@ -219,8 +210,10 @@ expand s = (expand' sconf, expand' sint)
     sint = Set.map (integrity *** integrity) s'
 
     expand' :: Set (J, J) -> Set (J, M)
-    expand' = Set.foldr' (\(p, J q) -> Set.union [(p', q')
-                                                 | p' <- (⊗) p, q' <- q]) Set.empty
+    expand' = Set.foldr' (\(p, J q) ->
+                            Set.union (Set.fromList [(p', q')
+                                                    | p' <- Set.toList ((⊗) p),
+                                                      q' <- Set.toList q])) Set.empty
 
 {- Not actually the powerset: We're removing the empty set -}
 powerset :: Ord a => Set a -> Set (Set a)
@@ -233,35 +226,36 @@ powerset = Set.delete Set.empty .
 {- For every (b /\ b ...) ≽ (b \/ b ...) we want a node for each non-empty
    subsequence of conjs and disjs -}
 atomize :: Set (J, M) -> Set (J, J)
-atomize s = [(J p', J (Set.singleton (M q'))) |
-              (J p, M q) <- s, p' <- powerset p, q' <- powerset q]
+atomize s = Set.fromList
+            [(J p', J (Set.singleton (M q'))) |
+              (J p, M q) <- Set.toList s, p' <- Set.toList (powerset p), q' <- Set.toList (powerset q)]
 
 {- Compute transitive closure of a set -}
 transitive :: (Ord a, Eq a) => Set (a, a) -> Set (a, a)
 transitive s
   | s == s' = s
   | otherwise  = transitive s'
-  where s' = s `Set.union` [(a, c) | (a, b) <- s, (b', c) <- s, b == b']
+  where s' = s `Set.union` Set.fromList [(a, c) | (a, b) <- Set.toList s, (b', c) <- Set.toList s, b == b']
 
 {- Join of meets into Meet of joins -}
 (⊗) :: J -> Set J
-(⊗) (J ms) = [J . Set.fromList $ map mkM ps |
-              ps <- sequence [bs | M bs <- Set.toList ms]]
+(⊗) (J ms) = Set.fromList
+             [J . Set.fromList $ map mkM ps |
+              ps <- sequence [Set.toList bs | M bs <- Set.toList ms]]
   where mkM = M . Set.singleton
 
 del :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
 del (p, q) = do
-  clr <- lift getClearance
-  l <- lift getLabel
   h <- lift getState
   strat <- lift getStrategy
-  lift getStrategy >>=
-    anyM (\stratClr -> do
-             h' <- setFilterMapM (\lab ->
-                                  labelOf lab ⊔ l .⊑ stratClr >>= \case
-                                    True -> Just <$> unlabel' lab
-                                    False -> return Nothing) $ (unH h)
-             reach (p, q) h')
+  r <- anyM (\stratClr -> do
+                h' <- setFilterMapM (\lab -> do
+                                        l <- liftLIO getLabel
+                                        labelOf lab ⊔ l .⊑ stratClr >>= \case
+                                          True -> Just <$> unlabel' lab
+                                          False -> return Nothing) $ (unH h)
+                reach (p, q) h') strat
+  return r
 
 (.≽) :: MonadLIO H FLAM m => Principal -> Principal -> Magic m Bool
 p .≽ q =
@@ -285,8 +279,8 @@ instance SemiLattice Principal where
   p ⊔ q = normalize ((p :/\ q) :→) :/\ normalize ((p :\/ q) :←)
   p ⊓ q = normalize ((p :\/ q) :→) :/\ normalize ((p :/\ q) :←)
 
-newtype Magic m a = Magic { unMagic :: ReaderT Trace (StateT Cache m) a }
-  deriving (Functor, Applicative, Monad, MonadReader Trace, MonadState Cache)
+newtype Magic m a = Magic { unMagic :: ReaderT (Trace, Int) (StateT Cache m) a }
+  deriving (Functor, Applicative, Monad, MonadReader (Trace, Int), MonadState Cache)
 
 instance MonadTrans Magic where
   lift m = Magic (lift $ lift $ m)

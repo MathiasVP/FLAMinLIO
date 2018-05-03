@@ -74,8 +74,8 @@ data Labeled l a = Labeled { _labeledLab :: l, _labeledVal :: a }
 
 makeLenses ''Labeled
 
-raise :: (MonadLIO s l m, Label t s l, Monad (t m)) => l -> t m ()
-raise l = do
+raise' :: (MonadLIO s l m, Label t s l, Monad (t m)) => l -> t m ()
+raise' l = do
   l' <- lift $ liftLIO $ gets $ view _1
   s <- lift getState
   b <- view cur l' ⊔ l .⊑ view clearance l'
@@ -83,7 +83,10 @@ raise l = do
     fail ("IFC violation (raise): " ++
            show (view cur l' ⊔ l) ++
            " ⊑ " ++ show (view clearance l'))
-  lift $ liftLIO $ modify $ over (_1 . cur) ((⊔) l)
+  lift $ liftLIO $ modify $ over (_1 . cur) (l ⊔)
+
+raise :: (MonadLIO s l m, Label t s l, Monad (t m)) => l -> m ()
+raise = run . raise'
   
 (<&&>) :: Monad m => m Bool -> m Bool -> m Bool
 (<&&>) m1 m2 =
@@ -118,7 +121,7 @@ label l a = run (label' l a)
 
 unlabel' :: (MonadLIO s l m, Label t s l, Monad (t m)) => Labeled l a -> t m a
 unlabel' lab = do
-  raise (labelOf lab)
+  raise' (labelOf lab)
   return (view labeledVal lab)
 
 unlabel :: (MonadLIO s l m, Label t s l, Monad (t m)) => Labeled l a -> m a
@@ -173,7 +176,7 @@ newRef l x = run (newRef' l x)
 
 readRef :: (MonadLIO s l m, Label t s l, Monad (t m)) => LIORef l a -> t m a
 readRef (LIORef lref) =
-  raise (labelOf lref) >> unlabel' lref >>= \r -> do
+  raise' (labelOf lref) >> unlabel' lref >>= \r -> do
   lift . liftLIO . LIO . StateT $ \s -> do
     x <- readIORef r
     return (x, s)

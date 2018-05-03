@@ -3,7 +3,7 @@
 module Bank where
 import FLAM
 import LIO
-import qualified Data.Set.Monad as Set
+import qualified Data.Set as Set
 import qualified Data.Map as Map
 import Data.Map(Map)
 import Control.Monad.State
@@ -30,9 +30,7 @@ transfer from to amount =
   gets (Map.lookup from) >>= \case
     Just account -> do
       balance <- lift $ unlabel account
-      isPremium <- from ≽ "Premium"
-      liftLIO $ LIO $ lift $ putStrLn $ from ++ ": " ++ show isPremium
-      if balance >= amount || isPremium then do
+      if balance >= amount then do
         from -= amount
         to += amount
       else return ()
@@ -51,10 +49,6 @@ addCustomer :: String -> StateT Bank FLAMIO ()
 addCustomer customer =
   addDelegate ("Bank" .: customer, ("Customer" %)) ((("Manager" \/ customer) ←) /\ ((:⊥) →))
 
-addPremium :: String -> StateT Bank FLAMIO ()
-addPremium prem =
-  addDelegate ("Bank" .: prem, ("Premium" %)) ((("Manager" \/ prem) ←) /\ ("Premium" →))
-
 createAccount :: String -> StateT Bank FLAMIO ()
 createAccount customer = do
   account <- label (customer %) 100
@@ -62,7 +56,7 @@ createAccount customer = do
 
 addAccountManager :: String -> StateT Bank FLAMIO ()
 addAccountManager accountant =
-  addDelegate ("Bank" .: accountant, ("Manager" %)) ((("Director" \/ accountant) ←) /\ ((:⊥) →))
+  addDelegate ("Bank" .: accountant, ("Manager" %)) ((accountant ←) /\ ((:⊥) →))
 
 addDirector :: String -> StateT Bank FLAMIO ()
 addDirector dir = do
@@ -70,7 +64,8 @@ addDirector dir = do
 
 assignAccountManager :: String -> String -> StateT Bank FLAMIO () 
 assignAccountManager manager customer = do
-  addDelegate ((manager %), (customer %)) (manager \/ customer)
+  addDelegate ((manager →), (customer →)) (manager \/ customer)
+  addDelegate ((customer ←), (manager ←)) (manager \/ customer)
 
 asUser :: User -> StateT Bank FLAMIO () -> StateT Bank FLAMIO ()
 asUser u m = do
@@ -92,17 +87,16 @@ execBank = flip execStateT Map.empty
 
 example :: FLAMIO Bank
 example = execBank $ do
-  lift $ liftLIO $ setStrategy []
+  liftLIO $ setStrategy []
   
   addRole "Customer"  
   addRole "Manager"
   addRole "Director"
-  addRole "Premium"
 
   addCustomer "Charlie"
   addCustomer "Chloe"
   addCustomer "Charlotte"
-  addPremium "Paige"
+  addCustomer "Paige"
 
   createAccount "Charlie"
   createAccount "Chloe"
@@ -128,7 +122,7 @@ example = execBank $ do
         {- ... -}
         return ()
       Nothing -> return ()
-
+  
   -- Chloe is allowed to wire money from her own account to Charlotte
   liftLIO $ setStrategy []
   asUser "Chloe" $ do
@@ -138,11 +132,11 @@ example = execBank $ do
   liftLIO $ setStrategy [("Michael" %)]
   asUser "Michael" $ do
     transfer "Chloe" "Charlie" 20
-
+    
   -- Charlie is not allowed to transfer money from Charlotte to his own account!
-  liftLIO $ setStrategy []
+  {-liftLIO $ setStrategy []
   asUser "Charlie" $ do
-    transfer "Charlotte" "Charlie" 30
+    transfer "Charlotte" "Charlie" 30-}
 
 runExample :: IO Bank
 runExample =
