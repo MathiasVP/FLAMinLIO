@@ -96,12 +96,10 @@ example = execBank $ do
   addCustomer "Charlie"
   addCustomer "Chloe"
   addCustomer "Charlotte"
-  addCustomer "Paige"
 
   createAccount "Charlie"
   createAccount "Chloe"
   createAccount "Charlotte"
-  createAccount "Paige"
 
   addAccountManager "Matt"
   addAccountManager "Michael"
@@ -111,13 +109,20 @@ example = execBank $ do
   assignAccountManager "Matt" "Charlie"
   assignAccountManager "Michael" "Chloe"
   assignAccountManager "Michael" "Charlotte"
-  assignAccountManager "Matt" "Paige"
 
-  -- Matt is Charlie's account manager, so he can see the amount of money on Charlie's account
+  -- Matt is Charlie's account manager, so he can see the amount
+  -- of money on Charlie's account
   liftLIO $ setStrategy [("Matt" %)]
   asUser "Matt" $ do
     Map.lookup "Charlie" <$> get >>= \case
       Just amount -> do
+        liftLIO $ LIO $ lift $ putStrLn "Computing Charlie ⊑ Matt"
+        b1 <- ("Charlie" %) ⊑ ("Matt" %)
+        liftLIO $ LIO $ lift $ print b1
+        
+        liftLIO $ LIO $ lift $ putStrLn "Recomputing Charlie ⊑ Matt"
+        b2 <- ("Charlie" %) ⊑ ("Matt" %)
+        liftLIO $ LIO $ lift $ print b2
         a <- unlabel amount
         {- ... -}
         return ()
@@ -128,7 +133,8 @@ example = execBank $ do
   asUser "Chloe" $ do
     transfer "Chloe" "Charlotte" 10
 
-  -- Michael is the manager of Chloe's account, so he can move money from Chloe to Charlie
+  -- Michael is the manager of Chloe's account, so he can move money
+  -- from Chloe to Charlie
   liftLIO $ setStrategy [("Michael" %)]
   asUser "Michael" $ do
     transfer "Chloe" "Charlie" 20

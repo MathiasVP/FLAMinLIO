@@ -296,10 +296,10 @@ instance (Label t s l, MonadLIO s l m) => MonadLIO s l (Magic m) where
   liftLIO x = Magic (liftLIO x)
   
 mSingleton :: L -> M
-mSingleton b = M $ Set.singleton b
+mSingleton = M . Set.singleton
 
 jSingleton :: L -> J
-jSingleton b = J $ Set.singleton $ mSingleton b
+jSingleton = J . Set.singleton . mSingleton
 
 mTop :: M
 mTop = mSingleton T
