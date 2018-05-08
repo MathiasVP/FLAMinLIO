@@ -1,11 +1,14 @@
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ExplicitForAll, ScopedTypeVariables #-}
-{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses, TemplateHaskell, FunctionalDependencies, LambdaCase #-}
+{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses, TemplateHaskell, FunctionalDependencies, LambdaCase, TypeFamilies #-}
 module LIO where
 
 import Control.Monad.State
 import Data.IORef
 import Control.Lens
+import Control.Monad.State.Class
 
 {- We need to seperate these two classes in order to call (⊔) and (⊔)
    without getting an ambiguity error since these two functions
@@ -26,88 +29,82 @@ newtype LIO s l a = LIO { unLIO :: StateT (BoundedLabel l, s, Strategy l) IO a }
 class Monad m => MonadLIO s l m | m -> s l where
   liftLIO :: LIO s l a -> m a
 
-instance Label t s l => MonadLIO s l (LIO s l) where
+instance Label s l => MonadLIO s l (LIO s l) where
   liftLIO = id
 
-instance (Label t s l, MonadLIO s l m) => MonadLIO s l (StateT st m) where
+instance (Label s l, MonadLIO s l m) => MonadLIO s l (StateT st m) where
   liftLIO m = StateT $ \st -> do
     x <- liftLIO m
     return (x, st)
 
-class (Show l, SemiLattice l, MonadTrans t) => Label t s l | s l -> t where
-  (.⊑) :: MonadLIO s l m => l -> l -> t m Bool
-  run :: MonadLIO s l m => t m a -> m a
+class (Show l, SemiLattice l) => Label s l where
+  type St l
+  (⊑) :: (MonadLIO s l m, MonadState (St l) m) => l -> l -> m Bool
 
-(⊑) :: (MonadLIO s l m, Label t s l) => l -> l -> m Bool
-p ⊑ q = run (p .⊑ q)
-
-instance Label t s l => Functor (LIO s l) where
+instance Label s l => Functor (LIO s l) where
   fmap f (LIO x) = LIO (fmap f x)
 
-instance Label t s l => Monad (LIO s l) where
+instance Label s l => Monad (LIO s l) where
   return x = LIO (return x)
   (LIO x) >>= f = LIO . StateT $ \s -> do
     (y, s') <- runStateT x s
     runStateT (unLIO $ f y) s'
 
-instance Label t s l => Applicative (LIO s l) where
+instance Label s l => Applicative (LIO s l) where
   pure = return
   (<*>) = ap
 
-instance Label t s l => MonadState (BoundedLabel l, s, Strategy l) (LIO s l) where
+instance Label s l => MonadState (BoundedLabel l, s, Strategy l) (LIO s l) where
   get = LIO . StateT $ \s -> return (s, s)
   put s = LIO . StateT $ const (return ((), s))
   
-getLabel :: (MonadLIO s l m, Label t s l) => m l
+getLabel :: (MonadLIO s l m, Label s l) => m l
 getLabel = liftLIO $ gets $ view $ _1 . cur
 
-getClearance :: (MonadLIO s l m, Label t s l) => m l
+getClearance :: (MonadLIO s l m, Label s l) => m l
 getClearance = liftLIO $ gets $ view $ _1 . clearance
 
-getState :: (MonadLIO s l m, Label t s l) => m s
+getState :: (MonadLIO s l m, Label s l) => m s
 getState = liftLIO $ gets $ view _2
 
-setState :: (MonadLIO s l m, Label t s l) => s -> m ()
+setState :: (MonadLIO s l m, Label s l) => s -> m ()
 setState s = liftLIO $ modify $ _2 .~ s
 
 data Labeled l a = Labeled { _labeledLab :: l, _labeledVal :: a }
 
 makeLenses ''Labeled
 
-raise' :: (MonadLIO s l m, Label t s l, Monad (t m)) => l -> t m ()
-raise' l = do
-  l' <- lift $ liftLIO $ gets $ view _1
-  s <- lift getState
-  b <- view cur l' ⊔ l .⊑ view clearance l'
+raise :: (MonadLIO s l m, Label s l, MonadState (St l) m) => l -> m ()
+raise l = do
+  l' <- liftLIO $ gets $ view _1
+  s <- getState
+  b <- view cur l' ⊔ l ⊑ view clearance l'
   unless b $
     fail ("IFC violation (raise): " ++
            show (view cur l' ⊔ l) ++
            " ⊑ " ++ show (view clearance l'))
-  lift $ liftLIO $ modify $ over (_1 . cur) (l ⊔)
-
-raise :: (MonadLIO s l m, Label t s l, Monad (t m)) => l -> m ()
-raise = run . raise'
+  liftLIO $ modify $ over (_1 . cur) (l ⊔)
   
-(<&&>) :: Monad m => m Bool -> m Bool -> m Bool
+(<&&>) :: (Monad m) => m Bool -> m Bool -> m Bool
 (<&&>) m1 m2 =
   m1 >>= \case
     True -> m2
     False -> return False
 infixr 8 <&&>
 
-(<||>) :: Monad m => m Bool -> m Bool -> m Bool
+(<||>) :: (Monad m) => m Bool -> m Bool -> m Bool
 (<||>) m1 m2 =
   m1 >>= \case
     True -> return True
     False -> m2
 infixr 7 <||>
 
-(∈) :: (MonadLIO s l m, Label t s l, Monad (t m)) => l -> BoundedLabel l -> t m Bool
-(∈) l lab = (view cur lab .⊑ l) <&&> (l .⊑ view clearance lab)
+(∈) :: (MonadLIO s l m, Label s l, MonadState (St l) m) => l -> BoundedLabel l -> m Bool
+(∈) l lab = (view cur lab ⊑ l) <&&> (l ⊑ view clearance lab)
 
-label' :: (MonadLIO s l m, Label t s l, Monad (t m)) => l -> a -> t m (Labeled l a)
-label' l x = do
-  lab <- lift $ liftLIO $ gets $ view _1
+label :: (MonadLIO s l m, Label s l, MonadState (St l) m) => l -> a -> m (Labeled l a)
+label l x = do
+  lab <- liftLIO $ gets $ view _1
   b <- l ∈ lab
   unless b $
     fail ("IFC violation (label): " ++
@@ -116,53 +113,35 @@ label' l x = do
            " ⊑ " ++ show (view clearance lab))
   return $ Labeled {_labeledLab = l, _labeledVal = x }
 
-label :: (MonadLIO s l m, Label t s l, Monad (t m)) => l -> a -> m (Labeled l a)
-label l a = run (label' l a)
-
-unlabel' :: (MonadLIO s l m, Label t s l, Monad (t m)) => Labeled l a -> t m a
-unlabel' lab = do
-  raise' (labelOf lab)
+unlabel :: (MonadLIO s l m, Label s l, MonadState (St l) m) => Labeled l a -> m a
+unlabel lab = do
+  raise (labelOf lab)
   return (view labeledVal lab)
 
-unlabel :: (MonadLIO s l m, Label t s l, Monad (t m)) => Labeled l a -> m a
-unlabel = run . unlabel'
-
-toLabeled' :: (MonadLIO s l m, Label t s l, Monad (t m)) => l -> m a -> t m (Labeled l a)
-toLabeled' l m = do
-  l' <- lift $ liftLIO $ gets $ view _1
-  res <- lift $ m
-  l'' <- lift $ liftLIO $ gets $ view $ _1 . cur
-  b <- l'' .⊑ l
+toLabeled :: (MonadLIO s l m, Label s l, MonadState (St l) m) => l -> m a -> m (Labeled l a)
+toLabeled l m = do
+  l' <- liftLIO $ gets $ view _1
+  res <- m
+  l'' <- liftLIO $ gets $ view $ _1 . cur
+  b <- l'' ⊑ l
   unless b $ do
     fail ("IFC violation (toLabeled): " ++ show l'' ++ " ⊑ " ++ show l)
-  lift $ liftLIO $ modify $ (_1 .~ l')
-  label' l res
+  liftLIO $ modify $ (_1 .~ l')
+  label l res
 
-toLabeled :: (MonadLIO s l m, Label t s l, Monad (t m)) => l -> m a -> m (Labeled l a)
-toLabeled l x = run (toLabeled' l x)
-
-setStrategy' :: (MonadLIO s l m, Label t s l, Monad (t m)) => Strategy l -> t m ()
-setStrategy' ls = lift $ liftLIO $ modify $ (_3 .~ ls)
-
-setStrategy :: (MonadLIO s l m, Label t s l, Monad (t m)) => Strategy l -> m ()
-setStrategy ls = run (setStrategy' ls)
-
-getStrategy' :: (MonadLIO s l m, Label t s l, Monad (t m)) => t m (Strategy l)
-getStrategy' = lift $ liftLIO $ gets $ view _3
-
-getStrategy :: (MonadLIO s l m, Label t s l, Monad (t m)) => m (Strategy l)
-getStrategy = run getStrategy'
+getStrategy :: (MonadLIO s l m, Label s l, MonadState (St l) m) => m (Strategy l)
+getStrategy = liftLIO $ gets $ view _3
 
 labelOf :: Labeled l a -> l
 labelOf = view labeledLab
 
 newtype LIORef l a = LIORef { unLIORef :: Labeled l (IORef a) }
 
-newRef' :: (MonadLIO s l m, Label t s l, Monad (t m)) => l -> a -> t m (LIORef l a)
-newRef' l x = do
-  lab <- lift $ liftLIO $ gets $ view _1
+newRef :: (MonadLIO s l m, Label s l, MonadState (St l) m) => l -> a -> m (LIORef l a)
+newRef l x = do
+  lab <- liftLIO $ gets $ view _1
   b <- l ∈ lab
-  lift . liftLIO . LIO . StateT $ \(lab, s, strat) -> do
+  liftLIO . LIO . StateT $ \(lab, s, strat) -> do
   unless b $
     fail ("IFC violation: " ++
            show (view cur lab) ++
@@ -171,22 +150,19 @@ newRef' l x = do
   r <- newIORef x
   return (LIORef (Labeled {_labeledLab = l, _labeledVal = r}), (lab, s, strat))
 
-newRef :: (MonadLIO s l m, Label t s l, Monad (t m)) => l -> a -> m (LIORef l a)
-newRef l x = run (newRef' l x)
-
-readRef :: (MonadLIO s l m, Label t s l, Monad (t m)) => LIORef l a -> t m a
+readRef :: (MonadLIO s l m, Label s l, MonadState (St l) m) => LIORef l a -> m a
 readRef (LIORef lref) =
-  raise' (labelOf lref) >> unlabel' lref >>= \r -> do
-  lift . liftLIO . LIO . StateT $ \s -> do
+  raise (labelOf lref) >> unlabel lref >>= \r -> do
+  liftLIO . LIO . StateT $ \s -> do
     x <- readIORef r
     return (x, s)
 
-(!) :: (MonadLIO s l m, Label t s l, Monad (t m)) => LIORef l a -> m a
-(!) = run . readRef
+(!) :: (MonadLIO s l m, Label s l, MonadState (St l) m) => LIORef l a -> m a
+(!) = readRef
 
-writeRef :: (MonadLIO s l m, Label t s l, Monad (t m)) => LIORef l a -> a -> t m ()
+writeRef :: (MonadLIO s l m, Label s l, MonadState (St l) m) => LIORef l a -> a -> m ()
 writeRef (LIORef lref) x = do
-  lab <- lift $ liftLIO $ gets $ view _1
+  lab <- liftLIO $ gets $ view _1
   b <- labelOf lref ∈ lab
   unless b $
     fail ("IFC violation: " ++
@@ -194,10 +170,10 @@ writeRef (LIORef lref) x = do
            " ⊑ " ++ show (labelOf lref) ++
            " ⊑ " ++ show (view clearance lab))
     
-  unlabel' lref >>= \ref ->
-    lift . liftLIO . LIO . StateT $ \s -> do
+  unlabel lref >>= \ref ->
+    liftLIO . LIO . StateT $ \s -> do
       writeIORef ref x
       return ((), s)
 
-(.=) :: (MonadLIO s l m, Label t s l, Monad (t m)) => LIORef l a -> a -> m ()
-(.=) r = run . writeRef r
+(.=) :: (MonadLIO s l m, Label s l, MonadState (St l) m) => LIORef l a -> a -> m ()
+(.=) = writeRef

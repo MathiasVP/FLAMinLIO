@@ -1,8 +1,9 @@
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances, ViewPatterns, PostfixOperators, MultiParamTypeClasses, ExplicitForAll, ScopedTypeVariables, LambdaCase, MonadComprehensions, GeneralizedNewtypeDeriving, UndecidableInstances #-}
-module FLAM(Principal(..), (≽), (⊑), H(..), FLAM, FLAMIO, bot, top, (%), (/\), (\/), (→), (←), (.:), addDelegate, removeDelegate) where
+{-# LANGUAGE FlexibleInstances, ViewPatterns, PostfixOperators, MultiParamTypeClasses, ExplicitForAll, ScopedTypeVariables, LambdaCase, MonadComprehensions, GeneralizedNewtypeDeriving, UndecidableInstances, DeriveGeneric #-}
+module FLAM where
 
 import LIO
 import TCB()
@@ -32,6 +33,9 @@ listview = Set.toList
 setview :: Ord a => Set a -> Maybe (a, Set a)
 setview = Set.minView
 
+mapview :: Map k a -> Maybe ((k, a), Map k a)
+mapview = Map.minViewWithKey
+
 data Principal
   = (:⊤)
   | (:⊥)
@@ -45,8 +49,6 @@ data Principal
 
 newtype H = H { unH :: Set (Labeled Principal (Principal, Principal)) }
   deriving (Ord, Eq)
-
-type Trace = Set (Principal, Principal)
 
 data L
   = N String
@@ -64,16 +66,59 @@ newtype J = J { unJ :: Set M } -- M₁ /\ M₂ /\ ... /\ Mₙ
 data JNF = JNF { confidentiality :: J, integrity :: J }
   deriving (Show, Eq, Ord)
 
-type QueryCacheResult = (POMap (Set (Principal, Principal)) Principal, POMap (Set (Principal, Principal)) Principal)
-type QueryCache = Map (Principal, Principal, Principal) QueryCacheResult
-type ReachabilityCache = Map (Set (Principal, Principal)) ((Set (J, J), Set (J, J)))
-data Cache = Cache { _reachabilityCache :: ReachabilityCache, _queryCache :: QueryCache }
+data ProgressCondition l
+  = ActsFor l l
+  | Conj (ProgressCondition l) (ProgressCondition l)
+  | Disj (ProgressCondition l) (ProgressCondition l)
+  | TrueCondition
+  | FalseCondition
+  deriving (Show, Eq)
+
+type ReachabilityCache l = Map (Set (l, l)) ((Set (J, J), Set (J, J)))
+type ProvedCache l = Map (l, l, H, Strategy l) (Map (l, l) l)
+type PrunedCache l = Map (l, l) (Map (l, l) (ProgressCondition l))
+type FailedCache l = Map (l, l, H, Strategy l) (Map (l, l) l)
+data Cache l = Cache { _reachabilityCache :: ReachabilityCache l,
+                     _provedCache :: ProvedCache l,
+                     _prunedCache :: PrunedCache l,
+                     _failedCache :: FailedCache l }
 
 makeLenses ''Cache
 
-emptyCache :: Cache
+emptyCache :: Cache Principal
 emptyCache = Cache { _reachabilityCache = Map.empty,
-                     _queryCache = Map.empty }
+                     _provedCache = Map.empty,
+                     _prunedCache = Map.empty,
+                     _failedCache = Map.empty }
+
+newtype Original t = Original t
+newtype Replacement t = Replacement t
+newtype Pattern t = Pattern t
+
+-- substitute oldpc newpc pc means pc[oldpc -> newpc]
+substitute :: Eq l => Pattern (ProgressCondition l) -> Replacement (ProgressCondition l) ->
+              Original (ProgressCondition l) -> ProgressCondition l
+substitute (Pattern oldpc) (Replacement newpc) (Original pc) | oldpc == pc = newpc
+substitute oldpc newpc (Original (Conj pc1 pc2)) =
+  Conj (substitute oldpc newpc (Original pc1)) (substitute oldpc newpc (Original pc2))
+substitute oldpc newpc (Original (Disj pc1 pc2)) =
+  Disj (substitute oldpc newpc (Original pc1)) (substitute oldpc newpc (Original pc2))
+substitute _ _ (Original progCond) = progCond
+
+data QueryResult l
+  = Failed
+  | Success
+  | Pruned (ProgressCondition l)
+  deriving Show
+
+liftB :: Bool -> QueryResult l
+liftB True = Success
+liftB False = Failed
+
+lowerB :: QueryResult Principal -> Bool
+lowerB Success = True
+lowerB Failed = False
+lowerB (Pruned pc) = isSatisfied pc
 
 setFilterMapM :: (Ord a, Ord b, Monad m) => (a -> m (Maybe b)) -> Set a -> m (Set b)
 setFilterMapM f s = visit s Set.empty
@@ -83,103 +128,242 @@ setFilterMapM f s = visit s Set.empty
             Nothing -> visit as s
             Just b -> visit as (Set.insert b s)
 
-querycache :: MonadLIO H FLAM m => Principal -> Principal -> Principal -> Magic m QueryCacheResult
-querycache cur p q = do
-  Map.lookup (cur, p, q) <$> gets (view queryCache) >>= \case
-    Just (trueSet, falseSet) -> return (trueSet, falseSet)
-    Nothing -> do
-      modify $ over queryCache $ Map.insert (cur, p, q) (POMap.empty, POMap.empty)
-      return (POMap.empty, POMap.empty)
+mapFilterM :: (Ord k, Monad m) => (a -> m Bool) -> Map k a -> m (Map k a)
+mapFilterM p m = visit m Map.empty
+  where visit (mapview -> Nothing) m = return m
+        visit (mapview -> Just ((k, a), m')) m =
+          p a >>= \case
+            False -> visit m' m
+            True -> visit m' (Map.insert k a m)
 
-searchCache :: MonadLIO H FLAM m => Principal -> Principal -> Magic m (Maybe Bool)
-searchCache p q = do
-  tr <- asks fst
-  curLab <- liftLIO getLabel
-  (truecache, falsecache) <- querycache curLab p q
-  case POMap.lookupGE tr truecache of
-    (_, cur'):_ -> do
-      liftLIO $ modify $ _1 . cur .~ cur'
-      return $ Just True
-    [] ->
-      case POMap.lookupLE tr falsecache of
-        (_, cur'):_ -> do
-          liftLIO $ modify $ _1 . cur .~ cur'
-          return $ Just False
-        [] -> return Nothing
+(<&&&>) :: (Monad m) => m (QueryResult l) -> m (QueryResult l) -> m (QueryResult l)
+(<&&&>) m1 m2 =
+  m1 >>= \case
+    Success -> m2
+    Failed -> return Failed
+    Pruned pc1 ->
+      m2 >>= \case
+        Success -> return $ Pruned pc1
+        Failed -> return Failed
+        Pruned pc2 -> return $ Pruned $ pc1 `Conj` pc2
+infixr 8 <&&&>
 
-insertCacheValue :: MonadLIO H FLAM m => Principal -> Principal -> Principal -> Bool -> Magic m ()
-insertCacheValue cur p q b = do
-  tr <- asks fst
+(<|||>) :: (Monad m) => m (QueryResult l) -> m (QueryResult l) -> m (QueryResult l)
+(<|||>) m1 m2 =
+  m1 >>= \case
+    Success -> return Success
+    Failed -> m2
+    Pruned pc1 ->
+      m2 >>= \case
+        Success -> return Success
+        Failed -> return $ Pruned pc1
+        Pruned pc2 -> return $ Pruned $ pc1 `Disj` pc2
+infixr 7 <|||>
+
+mapMapMaybeM :: (Monad m, Ord k) => (a -> m (Maybe b)) -> Map k a -> m (Map k b)
+mapMapMaybeM f m = do
+  let xs = Map.toList m
+  ys <- mapMaybeM (f . snd) xs
+  return $ Map.fromList (zipWith (\(k, _) y -> (k, y)) xs ys)
+
+isSatisfied :: ProgressCondition Principal -> Bool
+isSatisfied (ActsFor p q) = False
+isSatisfied (Conj pc1 pc2) =
+  case isSatisfied pc1 of
+    True -> isSatisfied pc2
+    False -> False
+isSatisfied (Disj pc1 pc2) =
+ case isSatisfied pc1 of
+   True -> True
+   False -> isSatisfied pc1
+isSatisfied TrueCondition = True
+isSatisfied FalseCondition = False
+
+isFalse :: ProgressCondition Principal -> Bool
+isFalse = not . isSatisfied
+
+mapMaybeKeepM :: (Ord k, Monad m) => (a -> m (Maybe b)) -> Map k a -> m (Map k a, Map k b)
+mapMaybeKeepM _ (mapview -> Nothing) = return (Map.empty, Map.empty)
+mapMaybeKeepM f (mapview -> Just ((k, a), m)) = do
+  (m1, m2) <- mapMaybeKeepM f m
+  f a >>= \case
+    Just b -> return (m1, Map.insert k b m2)
+    Nothing -> return (Map.insert k a m1, m2)
+  
+update :: forall m . (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> (Principal, Principal) -> QueryResult Principal -> m ()
+update (cur, clr) (p, q) Success = do
   cur' <- liftLIO getLabel
-  (truecache, falsecache) <- querycache p q cur
-  if b then
-    modify $ over queryCache $ Map.insert (cur, p, q) (POMap.insert tr cur' truecache, falsecache)
-  else modify $ over queryCache $ Map.insert (cur, p, q) (truecache, POMap.insert tr cur' falsecache)
+  h <- liftLIO $ gets $ view _2
+  strat <- liftLIO $ gets $ view _3
+  modify $ over provedCache $ Map.alter (insertProved cur') (cur, clr, h, strat)
+  modify $ over prunedCache $ Map.update (Just . Map.delete (p, q)) (cur, clr)
+  modify $ over failedCache $ Map.update (Just . Map.delete (p, q)) (cur, clr, h, strat)
+  prunedmap <- Map.lookup (cur, clr) <$> gets (view prunedCache) >>= \case
+    Just prunedmap -> mapMapMaybeM updatePruned prunedmap
+    Nothing -> return Map.empty
+  
+  modify $ over prunedCache $ Map.insert (cur, clr) prunedmap
+  where insertProved cur Nothing = Just $ Map.singleton (p, q) cur
+        insertProved cur (Just map) = Just $ Map.insert (p, q) cur map
 
-(.≽.) :: (MonadLIO H FLAM m) => Principal -> Principal -> Magic m Bool
+        updatePruned :: ProgressCondition Principal -> m (Maybe (ProgressCondition Principal))
+        updatePruned progCond = do
+          let progCond' = substitute (Pattern (ActsFor p q)) (Replacement TrueCondition) (Original progCond)
+          case isSatisfied progCond' of
+            True -> return Nothing
+            False -> return $ Just progCond'
+update (cur, clr) (p, q) (Pruned progCond) = do
+  modify $ over prunedCache $ Map.alter insertPruned (cur, clr)
+  prunedmap <- Map.lookup (cur, clr) <$> gets (view prunedCache) >>= \case
+    Just prunedmap -> return $ Map.map updatePruned prunedmap
+    Nothing -> return Map.empty
+  modify $ over prunedCache $ Map.insert (cur, clr) prunedmap
+  where insertPruned Nothing = Just $ Map.singleton (p, q) progCond
+        insertPruned (Just map) = Just $ Map.insert (p, q) progCond map
+
+        updatePruned :: ProgressCondition Principal -> ProgressCondition Principal
+        updatePruned = substitute (Pattern (ActsFor p q)) (Replacement progCond) . Original
+update (cur, clr) (p, q) Failed = do
+  cur' <- liftLIO getLabel
+  h <- liftLIO $ gets $ view _2
+  strat <- liftLIO $ gets $ view _3
+  modify $ over failedCache $ Map.alter (insertFailed cur') (cur, clr, h, strat)
+  modify $ over prunedCache $ Map.update (Just . Map.delete (p, q)) (cur, clr)
+  (new, prunedmap) <- Map.lookup (cur, clr) <$> gets (view prunedCache) >>= \case
+    Just prunedmap -> mapMaybeKeepM updatePruned prunedmap
+    Nothing -> return (Map.empty, Map.empty)
+  modify $ over prunedCache $ Map.insert (cur, clr) prunedmap
+  forM_ (Map.keys new) $ flip (update (cur, clr)) Failed
+  where insertFailed cur Nothing = Just $ Map.singleton (p, q) cur
+        insertFailed cur (Just map) = Just $ Map.insert (p, q) cur map
+        
+        updatePruned :: ProgressCondition Principal -> m (Maybe (ProgressCondition Principal))
+        updatePruned progCond = do
+          let progCond' = substitute (Pattern (ActsFor p q)) (Replacement FalseCondition) (Original progCond)
+          case isFalse progCond' of
+            True -> return Nothing
+            False -> return $ Just progCond'
+
+searchFailedCache :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> (Principal, Principal) -> m (Maybe Principal)
+searchFailedCache (cur, clr) (p, q) = do
+  cache <- get
+  h <- liftLIO $ gets $ view _2
+  strat <- liftLIO $ gets $ view _3
+  case Map.lookup (cur, clr, h, strat) (view failedCache cache) of
+    Just failed ->
+      case Map.lookup (p, q) failed of
+        Just cur' -> return $ Just cur'
+        Nothing -> return Nothing
+    Nothing -> return Nothing
+
+searchProvedCache :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> (Principal, Principal) -> m (Maybe Principal)
+searchProvedCache (cur, clr) (p, q) = do
+  cache <- get
+  h <- liftLIO $ gets $ view _2
+  strat <- liftLIO $ gets $ view _3
+  case Map.lookup (cur, clr, h, strat) (view provedCache cache) of
+    Just pcache ->
+      case Map.lookup (p, q) pcache of
+        Just cur' -> return $ Just cur'
+        Nothing -> return Nothing
+    Nothing -> return Nothing
+
+data CacheSearchResult l
+  = ProvedResult l
+  | FailedResult l
+  | PrunedResult (ProgressCondition l)
+           
+searchcache :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> (Principal, Principal) ->
+               m (Maybe (CacheSearchResult Principal))
+searchcache (cur, clr) (p, q) = do
+  let failedSearch = searchFailedCache (cur, clr) (p, q)
+      prunedSearch = searchPrunedCache (cur, clr) (p, q)
+      provedSearch = searchProvedCache (cur, clr) (p, q)
+  (,,) <$> provedSearch <*> failedSearch <*> prunedSearch >>= \case
+    (Just cur', _, _) -> return $ Just $ ProvedResult cur'
+    (_, Just cur', _) -> return $ Just $ FailedResult cur'
+    (_, _, Just pc) -> return $ Just $ PrunedResult pc
+    (_, _, _) -> return Nothing
+
+searchPrunedCache :: (MonadState (Cache Principal) m) => (Principal, Principal) -> (Principal, Principal) -> m (Maybe (ProgressCondition Principal))
+searchPrunedCache (cur, clr) (p, q) = do
+  cache <- get
+  case Map.lookup (cur, clr) (view prunedCache cache) of
+    Just pcache ->
+      case Map.lookup (p, q) pcache of
+        Just progCond -> return $ Just progCond
+        Nothing -> return Nothing
+    Nothing -> return Nothing
+
+(.≽.) :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => Principal -> Principal -> m (QueryResult Principal)
 p .≽. q = do
   curLab <- liftLIO getLabel
-  searchCache p q >>= \case
-    Just b -> return b
-    Nothing ->
-      asks (Set.member (p, q) . fst) >>= \case
-        True -> do
-          insertCacheValue curLab p q False
-          return False -- Cycle!
-        False -> do
-          r <- Magic $ local (Set.insert (p, q) *** (+ 2)) $ unMagic (p .≽ q)
-          insertCacheValue curLab p q r
-          return r
+  clrLab <- liftLIO getClearance
+  
+  searchcache (curLab, clrLab) (p, q) >>= \case
+    Just (ProvedResult cur') -> do
+      liftLIO $ modify $ (_1 . cur) .~ cur'
+      return Success
+    Just (FailedResult cur') -> do
+      liftLIO $ modify $ (_1 . cur) .~ cur'
+      return Failed
+    Just (PrunedResult progCond) -> do
+      return $ Pruned progCond
+    Nothing -> do
+      update (curLab, clrLab) (p, q) (Pruned (ActsFor p q))
+      r <- p .≽ q
+      update (curLab, clrLab) (p, q) r
+      return r
 
-bot_ :: (MonadLIO H FLAM m) => (Principal, Principal) -> Magic m Bool
-bot_ (_, (:⊥)) = return True
-bot_ (_, (((:→) (:⊥)) :/\ ((:←) (:⊥)))) = return True
-bot_ _ = return False
+bot_ :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> m (QueryResult Principal)
+bot_ (_, (:⊥)) = return Success
+bot_ (_, (((:→) (:⊥)) :/\ ((:←) (:⊥)))) = return Success
+bot_ _ = return Failed
 
-top_ :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
-top_ ((:⊤), _) = return True
-top_ ((((:→) (:⊤)) :/\ ((:←) (:⊤))), _) = return True
-top_ _ = return False
+top_ :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> m (QueryResult Principal)
+top_ ((:⊤), _) = return Success
+top_ ((((:→) (:⊤)) :/\ ((:←) (:⊤))), _) = return Success
+top_ _ = return Failed
 
-refl :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
-refl (p, q) | p == q = return True
-refl _ = return False
+refl :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> m (QueryResult Principal)
+refl (p, q) | p == q = return Success
+refl _ = return Failed
 
-proj :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
+proj :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> m (QueryResult Principal)
 proj ((:→) p, (:→) q) = p .≽. q
 proj ((:←) p, (:←) q) = p .≽. q
-proj _ = return False
+proj _ = return Failed
 
-projR :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
-projR (p, (:←) q) | p == q = return True
-projR (p, (:→) q) | p == q = return True
-projR _ = return False
+projR :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> m (QueryResult Principal)
+projR (p, (:←) q) | p == q = return Success
+projR (p, (:→) q) | p == q = return Success
+projR _ = return Failed
 
-own1 :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
-own1 (o ::: p, o' ::: p') = o .≽. o' <&&> p .≽. p'
-own1 _ = return False
+own1 :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> m (QueryResult Principal)
+own1 (o ::: p, o' ::: p') = o .≽. o' <&&&> p .≽. p'
+own1 _ = return Failed
 
-own2 :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
-own2 (o ::: p, o' ::: p') = o .≽. o' <&&> p .≽. (o' ::: p')
-own2 _ = return False
+own2 :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> m (QueryResult Principal)
+own2 (o ::: p, o' ::: p') = o .≽. o' <&&&> p .≽. (o' ::: p')
+own2 _ = return Failed
 
-conjL :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
-conjL (p1 :/\ p2, p) = p1 .≽. p <||> p2 .≽. p
-conjL _ = return False
+conjL :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> m (QueryResult Principal)
+conjL (p1 :/\ p2, p) = p1 .≽. p <|||> p2 .≽. p
+conjL _ = return Failed
 
-conjR :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
-conjR (p, p1 :/\ p2) = p .≽. p1 <&&> p .≽. p2
-conjR _ = return False
+conjR :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> m (QueryResult Principal)
+conjR (p, p1 :/\ p2) = p .≽. p1 <&&&> p .≽. p2
+conjR _ = return Failed
 
-disjL :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
-disjL (p1 :\/ p2, p) = p1 .≽. p <&&> p2 .≽. p
-disjL _ = return False
+disjL :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> m (QueryResult Principal)
+disjL (p1 :\/ p2, p) = p1 .≽. p <&&&> p2 .≽. p
+disjL _ = return Failed
 
-disjR :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
-disjR (p, p1 :\/ p2) = p .≽. p1 <||> p .≽. p2
-disjR _ = return False
+disjR :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> m (QueryResult Principal)
+disjR (p, p1 :\/ p2) = p .≽. p1 <|||> p .≽. p2
+disjR _ = return Failed
 
-reach :: MonadLIO H FLAM m => (Principal, Principal) -> Set (Principal, Principal) -> Magic m Bool
+reach :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> Set (Principal, Principal) -> m Bool
 reach (p, q) s = do
   let pNorm = norm p
       qNorm = norm q
@@ -244,56 +428,52 @@ transitive s
               ps <- sequence [Set.toList bs | M bs <- Set.toList ms]]
   where mkM = M . Set.singleton
 
-del :: MonadLIO H FLAM m => (Principal, Principal) -> Magic m Bool
+del :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> m (QueryResult Principal)
 del (p, q) = do
-  h <- lift getState
-  strat <- lift getStrategy
+  h <- getState
+  strat <- getStrategy
+  clr <- getClearance
   r <- anyM (\stratClr -> do
                 h' <- setFilterMapM (\lab -> do
                                         l <- liftLIO getLabel
-                                        labelOf lab ⊔ l .⊑ stratClr >>= \case
-                                          True -> Just <$> unlabel' lab
-                                          False -> return Nothing) $ (unH h)
+                                        labelOf lab ⊔ l ⊑ stratClr >>= \case
+                                          True -> do
+                                            liftLIO $ modify $ _1 . cur .~ l
+                                            Just <$> unlabel lab
+                                          False -> do
+                                            liftLIO $ modify $ _1 . cur .~ l
+                                            return Nothing) $ (unH h)
                 reach (p, q) h') strat
-  return r
+  return $ liftB r
 
-(.≽) :: MonadLIO H FLAM m => Principal -> Principal -> Magic m Bool
+(.≽) :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => Principal -> Principal -> m (QueryResult Principal)
 p .≽ q =
-  bot_ (p, q) <||>
-  top_ (p, q) <||>
-  refl (p, q) <||>
-  proj (p, q) <||>
-  projR (p, q) <||>
-  own1 (p, q) <||>
-  own2 (p, q) <||>
-  conjL (p, q) <||>
-  conjR (p, q) <||>
-  disjL (p, q) <||>
-  disjR (p, q) <||>
+  bot_ (p, q) <|||>
+  top_ (p, q) <|||>
+  refl (p, q) <|||>
+  proj (p, q) <|||>
+  projR (p, q) <|||>
+  own1 (p, q) <|||>
+  own2 (p, q) <|||>
+  conjL (p, q) <|||>
+  conjR (p, q) <|||>
+  disjL (p, q) <|||>
+  disjR (p, q) <|||>
   del (p, q)
 
-(≽) :: MonadLIO H FLAM m => (ToPrincipal a, ToPrincipal b) => a -> b -> m Bool
-p ≽ q = evalStateT (run (normalize (p %) .≽. normalize (q %))) Map.empty
-
-instance SemiLattice Principal where
-  p ⊔ q = normalize ((p :/\ q) :→) :/\ normalize ((p :\/ q) :←)
-  p ⊓ q = normalize ((p :\/ q) :→) :/\ normalize ((p :/\ q) :←)
-
-newtype Magic m a = Magic { unMagic :: ReaderT (Trace, Int) (StateT Cache m) a }
-  deriving (Functor, Applicative, Monad, MonadReader (Trace, Int), MonadState Cache)
-
-instance MonadTrans Magic where
-  lift m = Magic (lift $ lift $ m)
+(≽) :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (ToPrincipal a, ToPrincipal b) => a -> b -> m Bool
+p ≽ q = lowerB <$> normalize (p %) .≽. normalize (q %)
   
-instance Label Magic H Principal where
-  p .⊑ q = normalize ((q :→) :/\ (p :←)) .≽. normalize ((p :→) :/\ (q :←))
-  run query = evalStateT (runReaderT (unMagic query) (Set.empty, 0)) emptyCache
+instance SemiLattice Principal where
+  p ⊔ q = normalize (((p /\ q) →) /\ ((p \/ q) ←))
+  p ⊓ q = normalize (((p \/ q) →) /\ ((p /\ q) ←))
+  
+instance Label H Principal where
+  type St Principal = Cache Principal
+  p ⊑ q = ((q →) /\ (p ←)) ≽ ((p →) /\ (q ←))
 
 instance MonadLIO s l m => MonadLIO s l (ReaderT r m) where
   liftLIO x = lift (liftLIO x)
-
-instance (Label t s l, MonadLIO s l m) => MonadLIO s l (Magic m) where
-  liftLIO x = Magic (liftLIO x)
   
 mSingleton :: L -> M
 mSingleton = M . Set.singleton
@@ -535,16 +715,26 @@ bot = (:→) (:⊥) :/\ (:←) (:⊤)
 top :: Principal
 top = (:→) (:⊤) :/\ (:←) (:⊥)
 
-type FLAMIO = LIO H FLAM
+type FLAMIO = StateT (Cache Principal) (LIO H FLAM)
 
-addDelegate :: MonadLIO H FLAM m => (Principal, Principal) -> Principal -> m ()
+addDelegate :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> Principal -> m ()
 addDelegate (p, q) l = do
   h <- liftLIO getState
-  lab <- label l (p, q)
+  lab <- label l (normalize p, normalize q)
+  modify $ prunedCache .~ Map.empty
   liftLIO $ setState (H $ Set.insert lab (unH h))
 
-removeDelegate :: MonadLIO H FLAM m => (Principal, Principal) -> Principal -> m ()
+removeDelegate :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => (Principal, Principal) -> Principal -> m ()
 removeDelegate (p, q) l = do
   h <- liftLIO getState
   lab <- label l (p, q)
+  modify $ prunedCache .~ Map.empty
   liftLIO $ setState (H $ Set.delete lab (unH h))
+
+setStrategy :: (MonadLIO H FLAM m, MonadState (Cache Principal) m) => Strategy Principal -> m ()
+setStrategy ls = do
+  modify $ prunedCache .~ Map.empty
+  liftLIO $ modify $ (_3 .~ ls)
+
+runFLAM :: FLAMIO a -> LIO H FLAM a
+runFLAM a = evalStateT a emptyCache

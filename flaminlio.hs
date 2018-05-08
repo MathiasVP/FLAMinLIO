@@ -2,9 +2,9 @@
 module FLAMinLIO where
 import FLAM
 import LIO
-import qualified Data.Set.Monad as Set
-import Data.Set.Monad(Set)
 import Control.Monad.State
+import qualified Data.Set as Set
+import Data.Set(Set)
 
 withClearance :: Principal -> (BoundedLabel FLAM, H, Strategy Principal)
 withClearance p = (BoundedLabel { _cur = bot, _clearance = p }, H Set.empty, [])
