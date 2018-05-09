@@ -37,9 +37,23 @@ instance (Label s l, MonadLIO s l m) => MonadLIO s l (StateT st m) where
     x <- liftLIO m
     return (x, st)
 
+class Monad m => HasCache c m | m -> c where
+  getCache :: m c
+  putCache :: c -> m ()
+  
+  modifyCache :: (c -> c) -> m ()
+  modifyCache f = do
+    c <- getCache
+    putCache (f c)
+
+  getsCache :: (c -> a) -> m a
+  getsCache f = do
+    c <- getCache
+    return $ f c
+
 class (Show l, SemiLattice l) => Label s l where
   type St l
-  (⊑) :: (MonadLIO s l m, MonadState (St l) m) => l -> l -> m Bool
+  (⊑) :: (MonadLIO s l m, HasCache (St l) m) => l -> l -> m Bool
 
 instance Label s l => Functor (LIO s l) where
   fmap f (LIO x) = LIO (fmap f x)
@@ -74,7 +88,7 @@ data Labeled l a = Labeled { _labeledLab :: l, _labeledVal :: a }
 
 makeLenses ''Labeled
 
-raise :: (MonadLIO s l m, Label s l, MonadState (St l) m) => l -> m ()
+raise :: (MonadLIO s l m, Label s l, HasCache (St l) m) => l -> m ()
 raise l = do
   l' <- liftLIO $ gets $ view _1
   s <- getState
@@ -99,10 +113,10 @@ infixr 8 <&&>
     False -> m2
 infixr 7 <||>
 
-(∈) :: (MonadLIO s l m, Label s l, MonadState (St l) m) => l -> BoundedLabel l -> m Bool
+(∈) :: (MonadLIO s l m, Label s l, HasCache (St l) m) => l -> BoundedLabel l -> m Bool
 (∈) l lab = (view cur lab ⊑ l) <&&> (l ⊑ view clearance lab)
 
-label :: (MonadLIO s l m, Label s l, MonadState (St l) m) => l -> a -> m (Labeled l a)
+label :: (MonadLIO s l m, Label s l, HasCache (St l) m) => l -> a -> m (Labeled l a)
 label l x = do
   lab <- liftLIO $ gets $ view _1
   b <- l ∈ lab
@@ -113,12 +127,12 @@ label l x = do
            " ⊑ " ++ show (view clearance lab))
   return $ Labeled {_labeledLab = l, _labeledVal = x }
 
-unlabel :: (MonadLIO s l m, Label s l, MonadState (St l) m) => Labeled l a -> m a
+unlabel :: (MonadLIO s l m, Label s l, HasCache (St l) m) => Labeled l a -> m a
 unlabel lab = do
   raise (labelOf lab)
   return (view labeledVal lab)
 
-toLabeled :: (MonadLIO s l m, Label s l, MonadState (St l) m) => l -> m a -> m (Labeled l a)
+toLabeled :: (MonadLIO s l m, Label s l, HasCache (St l) m) => l -> m a -> m (Labeled l a)
 toLabeled l m = do
   l' <- liftLIO $ gets $ view _1
   res <- m
@@ -129,7 +143,7 @@ toLabeled l m = do
   liftLIO $ modify $ (_1 .~ l')
   label l res
 
-getStrategy :: (MonadLIO s l m, Label s l, MonadState (St l) m) => m (Strategy l)
+getStrategy :: (MonadLIO s l m, Label s l, HasCache (St l) m) => m (Strategy l)
 getStrategy = liftLIO $ gets $ view _3
 
 labelOf :: Labeled l a -> l
@@ -137,7 +151,7 @@ labelOf = view labeledLab
 
 newtype LIORef l a = LIORef { unLIORef :: Labeled l (IORef a) }
 
-newRef :: (MonadLIO s l m, Label s l, MonadState (St l) m) => l -> a -> m (LIORef l a)
+newRef :: (MonadLIO s l m, Label s l, HasCache (St l) m) => l -> a -> m (LIORef l a)
 newRef l x = do
   lab <- liftLIO $ gets $ view _1
   b <- l ∈ lab
@@ -150,17 +164,17 @@ newRef l x = do
   r <- newIORef x
   return (LIORef (Labeled {_labeledLab = l, _labeledVal = r}), (lab, s, strat))
 
-readRef :: (MonadLIO s l m, Label s l, MonadState (St l) m) => LIORef l a -> m a
+readRef :: (MonadLIO s l m, Label s l, HasCache (St l) m) => LIORef l a -> m a
 readRef (LIORef lref) =
   raise (labelOf lref) >> unlabel lref >>= \r -> do
   liftLIO . LIO . StateT $ \s -> do
     x <- readIORef r
     return (x, s)
 
-(!) :: (MonadLIO s l m, Label s l, MonadState (St l) m) => LIORef l a -> m a
+(!) :: (MonadLIO s l m, Label s l, HasCache (St l) m) => LIORef l a -> m a
 (!) = readRef
 
-writeRef :: (MonadLIO s l m, Label s l, MonadState (St l) m) => LIORef l a -> a -> m ()
+writeRef :: (MonadLIO s l m, Label s l, HasCache (St l) m) => LIORef l a -> a -> m ()
 writeRef (LIORef lref) x = do
   lab <- liftLIO $ gets $ view _1
   b <- labelOf lref ∈ lab
@@ -175,5 +189,5 @@ writeRef (LIORef lref) x = do
       writeIORef ref x
       return ((), s)
 
-(.=) :: (MonadLIO s l m, Label s l, MonadState (St l) m) => LIORef l a -> a -> m ()
+(.=) :: (MonadLIO s l m, Label s l, HasCache (St l) m) => LIORef l a -> a -> m ()
 (.=) = writeRef
