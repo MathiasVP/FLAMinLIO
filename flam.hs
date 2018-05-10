@@ -48,7 +48,7 @@ data Principal
   deriving (Eq, Ord, Show)
 
 newtype H = H { unH :: Set (Labeled Principal (Principal, Principal)) }
-  deriving (Ord, Eq)
+  deriving (Ord, Eq, Show)
 
 data L
   = N String
@@ -195,9 +195,9 @@ update (cur, clr) (p, q) Success = do
   cur' <- liftLIO getLabel
   h <- liftLIO $ gets $ view _2
   strat <- liftLIO $ gets $ view _3
+  --liftLIO $ LIO $ lift $ putStrLn $ "Caching " ++ show p ++ " ≽ " ++ show q ++ " as True in " ++ show (cur, clr, h, strat)
   modifyCache $ over provedCache $ Map.alter (insertProved cur') (cur, clr, h, strat)
   modifyCache $ over prunedCache $ Map.update (Just . Map.delete (p, q)) (cur, clr)
-  modifyCache $ over failedCache $ Map.update (Just . Map.delete (p, q)) (cur, clr, h, strat)
   prunedmap <- Map.lookup (cur, clr) <$> getsCache (view prunedCache) >>= \case
     Just prunedmap -> mapMapMaybeM updatePruned prunedmap
     Nothing -> return Map.empty
@@ -227,6 +227,8 @@ update (cur, clr) (p, q) Failed = do
   cur' <- liftLIO getLabel
   h <- liftLIO $ gets $ view _2
   strat <- liftLIO $ gets $ view _3
+  --liftLIO $ LIO $ lift $ putStrLn $ "Caching " ++ show p ++ " ≽ " ++ show q ++ " as False in " ++ show (cur, clr, h, strat)
+  --if p == (:→) (Name "Michael") :/\ (:←) (:⊤) && q == (:→) ((Name "Charlotte" :\/ Name "Michael") :/\ (Name "Chloe" :\/ Name "Michael")) :/\ (:←) (Name "Michael") && cur == (:→) (:⊥) :/\ (:←) (:⊤) && clr == Name "Michael" then return () else return ()
   modifyCache $ over failedCache $ Map.alter (insertFailed cur') (cur, clr, h, strat)
   modifyCache $ over prunedCache $ Map.update (Just . Map.delete (p, q)) (cur, clr)
   (new, prunedmap) <- Map.lookup (cur, clr) <$> getsCache (view prunedCache) >>= \case
@@ -302,9 +304,11 @@ p .≽. q = do
   
   searchcache (curLab, clrLab) (p, q) >>= \case
     Just (ProvedResult cur') -> do
+      --liftLIO $ LIO $ lift $ putStrLn "Cache hit (True)"
       liftLIO $ modify $ (_1 . cur) .~ cur'
       return Success
     Just (FailedResult cur') -> do
+      --liftLIO $ LIO $ lift $ putStrLn "Cache hit (Failed)"
       liftLIO $ modify $ (_1 . cur) .~ cur'
       return Failed
     Just (PrunedResult progCond) -> do
@@ -433,17 +437,17 @@ del (p, q) = do
   h <- getState
   strat <- getStrategy
   clr <- getClearance
-  r <- anyM (\stratClr -> do
-                h' <- setFilterMapM (\lab -> do
-                                        l <- liftLIO getLabel
-                                        labelOf lab ⊔ l ⊑ stratClr >>= \case
-                                          True -> do
-                                            liftLIO $ modify $ _1 . cur .~ l
-                                            Just <$> unlabel lab
-                                          False -> do
-                                            liftLIO $ modify $ _1 . cur .~ l
-                                            return Nothing) $ (unH h)
-                reach (p, q) h') strat
+  r <- anyM (\stratClr ->
+               let f lab = do
+                     l <- liftLIO getLabel
+                     (,) <$> (labelOf lab ⊔ l ⊑ stratClr) <*> stratClr ⊑ clr >>= \case
+                       (True, True) -> do
+                         r <- Just <$> unlabel lab
+                         return r
+                       _ -> do
+                         return Nothing
+               in do h' <- setFilterMapM f (unH h)
+                     reach (p, q) h') strat
   return $ liftB r
 
 (.≽) :: (MonadLIO H FLAM m, HasCache (Cache Principal) m) => Principal -> Principal -> m (QueryResult Principal)
