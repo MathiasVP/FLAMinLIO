@@ -210,7 +210,6 @@ update (cur, clr) (p, q) Success = do
   cur' <- liftLIO getLabel
   h <- liftLIO $ gets $ view _2
   strat <- liftLIO $ gets $ view _3
-  --liftLIO $ LIO $ lift $ putStrLn $ "Caching " ++ show p ++ " ≽ " ++ show q ++ " as True in " ++ show (cur, clr, h, strat)
   modifyCache $ over provedCache $ Map.alter (insertProved cur') (cur, clr, h, strat)
   modifyCache $ over prunedCache $ Map.update (Just . Map.delete (p, q)) (cur, clr)
   prunedmap <- Map.lookup (cur, clr) <$> getsCache (view prunedCache) >>= \case
@@ -242,8 +241,6 @@ update (cur, clr) (p, q) Failed = do
   cur' <- liftLIO getLabel
   h <- liftLIO $ gets $ view _2
   strat <- liftLIO $ gets $ view _3
-  --liftLIO $ LIO $ lift $ putStrLn $ "Caching " ++ show p ++ " ≽ " ++ show q ++ " as False in " ++ show (cur, clr, h, strat)
-  --if p == (:→) (Name "Michael") :/\ (:←) (:⊤) && q == (:→) ((Name "Charlotte" :\/ Name "Michael") :/\ (Name "Chloe" :\/ Name "Michael")) :/\ (:←) (Name "Michael") && cur == (:→) (:⊥) :/\ (:←) (:⊤) && clr == Name "Michael" then return () else return ()
   modifyCache $ over failedCache $ Map.alter (insertFailed cur') (cur, clr, h, strat)
   modifyCache $ over prunedCache $ Map.update (Just . Map.delete (p, q)) (cur, clr)
   (new, prunedmap) <- Map.lookup (cur, clr) <$> getsCache (view prunedCache) >>= \case
@@ -322,11 +319,9 @@ p .≽. q = do
   
   r <- searchcache (curLab, clrLab) (p, q) >>= \case
     Just (ProvedResult cur') -> do
-      --liftLIO $ LIO $ lift $ putStrLn "Cache hit (True)"
       liftLIO $ modify $ (_1 . cur) .~ cur'
       return Success
     Just (FailedResult cur') -> do
-      --liftLIO $ LIO $ lift $ putStrLn "Cache hit (Failed)"
       liftLIO $ modify $ (_1 . cur) .~ cur'
       return Failed
     Just (PrunedResult progCond) -> do
