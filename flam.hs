@@ -195,7 +195,6 @@ update (cur, clr) (p, q) Success = do
   cur' <- liftLIO getLabel
   h <- liftLIO $ gets $ view _2
   strat <- liftLIO $ gets $ view _3
-  --liftLIO $ LIO $ lift $ putStrLn $ "Caching " ++ show p ++ " ≽ " ++ show q ++ " as True in " ++ show (cur, clr, h, strat)
   modifyCache $ over provedCache $ Map.alter (insertProved cur') (cur, clr, h, strat)
   modifyCache $ over prunedCache $ Map.update (Just . Map.delete (p, q)) (cur, clr)
   prunedmap <- Map.lookup (cur, clr) <$> getsCache (view prunedCache) >>= \case
@@ -213,6 +212,8 @@ update (cur, clr) (p, q) Success = do
             True -> return Nothing
             False -> return $ Just progCond'
 update (cur, clr) (p, q) (Pruned progCond) = do
+  h <- liftLIO $ gets $ view _2
+  strat <- liftLIO $ gets $ view _3
   modifyCache $ over prunedCache $ Map.alter insertPruned (cur, clr)
   prunedmap <- Map.lookup (cur, clr) <$> getsCache (view prunedCache) >>= \case
     Just prunedmap -> return $ Map.map updatePruned prunedmap
@@ -227,8 +228,6 @@ update (cur, clr) (p, q) Failed = do
   cur' <- liftLIO getLabel
   h <- liftLIO $ gets $ view _2
   strat <- liftLIO $ gets $ view _3
-  --liftLIO $ LIO $ lift $ putStrLn $ "Caching " ++ show p ++ " ≽ " ++ show q ++ " as False in " ++ show (cur, clr, h, strat)
-  --if p == (:→) (Name "Michael") :/\ (:←) (:⊤) && q == (:→) ((Name "Charlotte" :\/ Name "Michael") :/\ (Name "Chloe" :\/ Name "Michael")) :/\ (:←) (Name "Michael") && cur == (:→) (:⊥) :/\ (:←) (:⊤) && clr == Name "Michael" then return () else return ()
   modifyCache $ over failedCache $ Map.alter (insertFailed cur') (cur, clr, h, strat)
   modifyCache $ over prunedCache $ Map.update (Just . Map.delete (p, q)) (cur, clr)
   (new, prunedmap) <- Map.lookup (cur, clr) <$> getsCache (view prunedCache) >>= \case
@@ -274,7 +273,19 @@ data CacheSearchResult l
   = ProvedResult l
   | FailedResult l
   | PrunedResult (ProgressCondition l)
-           
+
+searchPrunedCache :: (MonadLIO H FLAM m, HasCache (Cache Principal) m) => (Principal, Principal) -> (Principal, Principal) -> m (Maybe (ProgressCondition Principal))
+searchPrunedCache (cur, clr) (p, q) = do
+  cache <- getCache
+  h <- liftLIO $ gets $ view _2
+  strat <- liftLIO $ gets $ view _3
+  case Map.lookup (cur, clr) (view prunedCache cache) of
+    Just pcache ->
+      case Map.lookup (p, q) pcache of
+        Just progCond -> return $ Just progCond
+        Nothing -> return Nothing
+    Nothing -> return Nothing
+    
 searchcache :: (MonadLIO H FLAM m, HasCache (Cache Principal) m) => (Principal, Principal) -> (Principal, Principal) ->
                m (Maybe (CacheSearchResult Principal))
 searchcache (cur, clr) (p, q) = do
@@ -287,16 +298,6 @@ searchcache (cur, clr) (p, q) = do
     (_, _, Just pc) -> return $ Just $ PrunedResult pc
     (_, _, _) -> return Nothing
 
-searchPrunedCache :: (HasCache (Cache Principal) m) => (Principal, Principal) -> (Principal, Principal) -> m (Maybe (ProgressCondition Principal))
-searchPrunedCache (cur, clr) (p, q) = do
-  cache <- getCache
-  case Map.lookup (cur, clr) (view prunedCache cache) of
-    Just pcache ->
-      case Map.lookup (p, q) pcache of
-        Just progCond -> return $ Just progCond
-        Nothing -> return Nothing
-    Nothing -> return Nothing
-
 (.≽.) :: (MonadLIO H FLAM m, HasCache (Cache Principal) m) => Principal -> Principal -> m (QueryResult Principal)
 p .≽. q = do
   curLab <- liftLIO getLabel
@@ -304,11 +305,9 @@ p .≽. q = do
   
   searchcache (curLab, clrLab) (p, q) >>= \case
     Just (ProvedResult cur') -> do
-      --liftLIO $ LIO $ lift $ putStrLn "Cache hit (True)"
       liftLIO $ modify $ (_1 . cur) .~ cur'
       return Success
     Just (FailedResult cur') -> do
-      --liftLIO $ LIO $ lift $ putStrLn "Cache hit (Failed)"
       liftLIO $ modify $ (_1 . cur) .~ cur'
       return Failed
     Just (PrunedResult progCond) -> do
@@ -440,12 +439,9 @@ del (p, q) = do
   r <- anyM (\stratClr ->
                let f lab = do
                      l <- liftLIO getLabel
-                     (,) <$> (labelOf lab ⊔ l ⊑ stratClr) <*> stratClr ⊑ clr >>= \case
-                       (True, True) -> do
-                         r <- Just <$> unlabel lab
-                         return r
-                       _ -> do
-                         return Nothing
+                     (,) <$> labelOf lab ⊔ l ⊑ clr <*> labelOf lab ⊑ stratClr >>= \case
+                       (True, True) -> Just <$> unlabel lab
+                       _ -> return Nothing
                in do h' <- setFilterMapM f (unH h)
                      reach (p, q) h') strat
   return $ liftB r
@@ -455,15 +451,15 @@ p .≽ q =
   bot_ (p, q) <|||>
   top_ (p, q) <|||>
   refl (p, q) <|||>
+  del (p, q) <|||>
   proj (p, q) <|||>
   projR (p, q) <|||>
   own1 (p, q) <|||>
   own2 (p, q) <|||>
-  conjL (p, q) <|||>
   conjR (p, q) <|||>
   disjL (p, q) <|||>
   disjR (p, q) <|||>
-  del (p, q)
+  conjL (p, q)
 
 (≽) :: (MonadLIO H FLAM m, HasCache (Cache Principal) m) => (ToPrincipal a, ToPrincipal b) => a -> b -> m Bool
 p ≽ q = lowerB <$> normalize (p %) .≽. normalize (q %)
