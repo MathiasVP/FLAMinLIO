@@ -53,10 +53,8 @@ getBalance u =
     Just account -> lift $ unlabel account
     Nothing -> return 0
 
-{-
 addRole :: String -> BankT FLAMIO ()
 addRole role = lift $ addDelegate (("Bank" %), (role %)) bot
--}
 
 addCustomer :: String -> BankT FLAMIO ()
 addCustomer customer =
@@ -77,8 +75,8 @@ addDirector dir = do
 
 assignAccountManager :: String -> String -> BankT FLAMIO () 
 assignAccountManager manager customer = do
-  lift $ addDelegate ((manager →), (customer →)) (manager \/ customer)
-  lift $ addDelegate ((customer ←), (manager ←)) (manager \/ customer)
+  lift $ addDelegate ((manager →), (customer →)) $ ((customer \/ manager) →) /\ ((customer /\ manager) ←)
+  lift $ addDelegate ((customer ←), (manager ←)) $ ((customer \/ manager) →) /\ ((customer /\ manager) ←)
 
 asUser :: User -> BankT FLAMIO () -> BankT FLAMIO ()
 asUser u m = do
@@ -98,20 +96,61 @@ evalBank = flip evalStateT Map.empty . unBankT
 execBank :: BankT FLAMIO a -> FLAMIO Bank
 execBank = flip execStateT Map.empty . unBankT
 
-lhs :: Principal
-lhs = (:→) ((Name "Charlotte" :\/ Name "Michael") :/\ (Name "Chloe" :\/ Name "Michael")) :/\ (:←) (:⊤)
+example :: FLAMIO Bank
+example = execBank $ do
+  lift $ setStrategy []
+  
+  --addRole "Customer"  
+  --addRole "Manager"
+  --addRole "Director"
 
-rhs :: Principal
-rhs = Name "Michael"
+  --addCustomer "Charlie"
+  --addCustomer "Chloe"
+  --addCustomer "Charlotte"
+  --addCustomer "Paige"
 
-lhs' :: Principal
-lhs' = ((rhs →) /\ (lhs ←))
+  createAccount "Charlie"
+  --createAccount "Chloe"
+  --createAccount "Charlotte"
+  --createAccount "Paige"
 
-rhs' :: Principal
-rhs' = ((lhs →) /\ (rhs ←))
+  --addAccountManager "Matt"
+  --addAccountManager "Michael"
+  
+  --addDirector "David"
+  
+  assignAccountManager "Matt" "Charlie"
+  --assignAccountManager "Michael" "Chloe"
+  --assignAccountManager "Michael" "Charlotte"
+  --assignAccountManager "Matt" "Paige"
 
--- (:→) (Name "Michael") :/\ (:←) (:⊤) ≽ (:→) ((Name "Charlotte" :\/ Name "Michael") :/\ (Name "Chloe" :\/ Name "Michael")) :/\ (:←) (Name "Michael")
+  -- Matt is Charlie's account manager, so he can see the amount of money on Charlie's account
+  liftLIO $ LIO $ lift $ putStrLn $ "----------------------------------------"
+  lift $ setStrategy [("Matt" %)]
+  asUser "Matt" $ do
+    Map.lookup "Charlie" <$> get >>= \case
+      Just amount -> do
+        a <- (:→) (Name "Matt") ≽ (:→) (Name "Charlie")
+        liftLIO $ LIO $ lift $ print a
+        {- ... -}
+        return ()
+      Nothing -> return ()
+  -- Chloe is allowed to wire money from her own account to Charlotte
+  {-lift $ setStrategy []
+  asUser "Chloe" $ do
+    transfer "Chloe" "Charlotte" 10-}
 
+  -- Michael is the manager of Chloe's account, so he can move money from Chloe to Charlie
+  {-lift $ setStrategy [("Michael" %)]
+  asUser "Michael" $ do
+    transfer "Chloe" "Charlie" 20-}
+    
+  -- Charlie is not allowed to transfer money from Charlotte to his own account!
+  {-liftLIO $ setStrategy []
+  asUser "Charlie" $ do
+    transfer "Charlotte" "Charlie" 30-}
+
+{-
 example :: FLAMIO Bank
 example = execBank $ do
   lift $ setStrategy []
@@ -120,14 +159,13 @@ example = execBank $ do
   addAccountManager "Michael"
   assignAccountManager "Michael" "Chloe"
   assignAccountManager "Michael" "Charlotte"
-  liftLIO $ LIO $ lift $ putStrLn "————————————————————————"
+  liftLIO $ LIO $ lift $ putStrLn "-------------------------------------"
   -- Michael is the manager of Chloe's account, so he can move money from
   -- Chloe to Charlie
   lift $ setStrategy [("Michael" %)]
-  asUser "Michael" $ do
-    b <- (:→) ((Name "Charlotte" :\/ Name "Michael") :/\ (Name "Chloe" :\/ Name "Michael")) :/\ (:←) (:⊤) ⊑ Name "Michael"
-    liftLIO $ LIO $ lift $ putStrLn (show b)
-    return ()
+  asUser ("Michael") $ do
+    b <- (:→) ((Name "Charlotte" :\/ Name "Michael") :/\ (Name "Chloe" :\/ Name "Michael")) ⊑ (:→) (Name "Michael")
+    liftLIO $ LIO $ lift $ putStrLn (show b)-}
 
 runExample :: IO Bank
 runExample =

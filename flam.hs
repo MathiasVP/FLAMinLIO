@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE KindSignatures #-}
@@ -27,6 +28,12 @@ import Control.Lens
 import Algebra.PartialOrd
 import Control.Monad.Extra
 
+-- Debugging!
+import Control.Exception
+import System.IO
+import Data.IORef
+import System.IO.Unsafe
+
 listview :: Ord a => Set a -> [a]
 listview = Set.toList
 
@@ -35,6 +42,11 @@ setview = Set.minView
 
 mapview :: Map k a -> Maybe ((k, a), Map k a)
 mapview = Map.minViewWithKey
+
+counter :: IORef Int
+{-# NOINLINE counter #-}
+counter = unsafePerformIO (newIORef 0)
+
 
 data Principal
   = (:⊤)
@@ -189,6 +201,10 @@ mapMaybeKeepM f (mapview -> Just ((k, a), m)) = do
   f a >>= \case
     Just b -> return (m1, Map.insert k b m2)
     Nothing -> return (Map.insert k a m1, m2)
+
+instance HasCache c m => HasCache c (ReaderT r m) where
+  getCache = lift getCache
+  putCache = lift . putCache
   
 update :: forall m . (MonadLIO H FLAM m, HasCache (Cache Principal) m) => (Principal, Principal) -> (Principal, Principal) -> QueryResult Principal -> m ()
 update (cur, clr) (p, q) Success = do
@@ -299,10 +315,13 @@ searchPrunedCache (cur, clr) (p, q) = do
 
 (.≽.) :: (MonadLIO H FLAM m, HasCache (Cache Principal) m) => Principal -> Principal -> m (QueryResult Principal)
 p .≽. q = do
+  indent <- liftLIO $ LIO $ lift $ readIORef counter
+  liftLIO $ LIO $ lift $ putStr $ replicate indent ' '
+  liftLIO $ LIO $ lift $ putStrLn $ show p ++ " ≽ " ++ show q
   curLab <- liftLIO getLabel
   clrLab <- liftLIO getClearance
   
-  searchcache (curLab, clrLab) (p, q) >>= \case
+  r <- searchcache (curLab, clrLab) (p, q) >>= \case
     Just (ProvedResult cur') -> do
       --liftLIO $ LIO $ lift $ putStrLn "Cache hit (True)"
       liftLIO $ modify $ (_1 . cur) .~ cur'
@@ -315,9 +334,39 @@ p .≽. q = do
       return $ Pruned progCond
     Nothing -> do
       update (curLab, clrLab) (p, q) (Pruned (ActsFor p q))
+      liftLIO $ LIO $ lift $ writeIORef counter (indent + 2)
       r <- p .≽ q
+      liftLIO $ LIO $ lift $ writeIORef counter indent
       update (curLab, clrLab) (p, q) r
       return r
+  liftLIO $ LIO $ lift $ putStr $ replicate indent ' '
+  liftLIO $ LIO $ lift $ putStrLn $ show p ++ " ≽ " ++ show q ++ " is " ++ show r
+  return r
+
+askUser = do
+  putStrLn "Type 'y' or 'n'"
+  getLine >>= \case
+    "y" -> return True
+    "n" -> return False
+    _ -> putStrLn "Please answer 'y' or 'n'." >> askUser
+
+ifUserChooses s m = do
+  b <- liftLIO $ LIO $ lift $ do
+    indent <- readIORef counter
+    putStr $ replicate indent ' '
+    putStrLn $ "Try " ++ s ++ "?"
+    askUser
+  if b then m else return Failed
+
+userChoice ss ms = do
+  n <- liftLIO $ LIO $ lift $ do
+    indent <- readIORef counter
+    putStr $ replicate indent ' '
+    putStrLn $ "Choose from 0 to " ++ show (length ms - 1) ++ ":"
+    forM_ (List.zip ss [0..]) $ \(s, i) -> putStrLn (show i ++ ". " ++ s)
+    line <- getLine
+    return (read line)
+  ms !! n
 
 bot_ :: (MonadLIO H FLAM m, HasCache (Cache Principal) m) => (Principal, Principal) -> m (QueryResult Principal)
 bot_ (_, (:⊥)) = return Success
@@ -352,7 +401,8 @@ own2 (o ::: p, o' ::: p') = o .≽. o' <&&&> p .≽. (o' ::: p')
 own2 _ = return Failed
 
 conjL :: (MonadLIO H FLAM m, HasCache (Cache Principal) m) => (Principal, Principal) -> m (QueryResult Principal)
-conjL (p1 :/\ p2, p) = p1 .≽. p <|||> p2 .≽. p
+conjL (p1 :/\ p2, p) = do
+  userChoice [show p1 ++ " ≽ " ++ show p, show p2 ++ " ≽ " ++ show p] [p1 .≽. p, p2 .≽. p]
 conjL _ = return Failed
 
 conjR :: (MonadLIO H FLAM m, HasCache (Cache Principal) m) => (Principal, Principal) -> m (QueryResult Principal)
@@ -364,7 +414,7 @@ disjL (p1 :\/ p2, p) = p1 .≽. p <&&&> p2 .≽. p
 disjL _ = return Failed
 
 disjR :: (MonadLIO H FLAM m, HasCache (Cache Principal) m) => (Principal, Principal) -> m (QueryResult Principal)
-disjR (p, p1 :\/ p2) = p .≽. p1 <|||> p .≽. p2
+disjR (p, p1 :\/ p2) = userChoice [show p ++ " ≽ " ++ show p1, show p ++ " ≽ " ++ show p2] [p .≽. p1, p .≽. p2]
 disjR _ = return Failed
 
 reach :: (MonadLIO H FLAM m, HasCache (Cache Principal) m) => (Principal, Principal) -> Set (Principal, Principal) -> m Bool
@@ -422,10 +472,10 @@ atomize s = Set.fromList
 transitive :: (Ord a, Eq a) => Set (a, a) -> Set (a, a)
 transitive s
   | s == s' = s
-  | otherwise  = transitive s'
+  | otherwise = transitive s'
   where s' = s `Set.union` Set.fromList [(a, c) | (a, b) <- Set.toList s, (b', c) <- Set.toList s, b == b']
 
-{- Join of meets into Meet of joins -}
+{- Join of meets into meet of joins -}
 (⊗) :: J -> Set J
 (⊗) (J ms) = Set.fromList
              [J . Set.fromList $ map mkM ps |
@@ -434,18 +484,36 @@ transitive s
 
 del :: (MonadLIO H FLAM m, HasCache (Cache Principal) m) => (Principal, Principal) -> m (QueryResult Principal)
 del (p, q) = do
+  indent <- liftLIO $ LIO $ lift $ readIORef counter
   h <- getState
   strat <- getStrategy
   clr <- getClearance
   r <- anyM (\stratClr ->
                let f lab = do
                      l <- liftLIO getLabel
-                     (,) <$> (labelOf lab ⊔ l ⊑ stratClr) <*> stratClr ⊑ clr >>= \case
-                       (True, True) -> do
-                         r <- Just <$> unlabel lab
-                         return r
-                       _ -> do
-                         return Nothing
+                     liftLIO $ LIO $ lift $ putStrLn $ "Use delegation " ++ show lab ++ "?"
+                     liftLIO (LIO (lift askUser)) >>= \case
+                       True -> do
+                         liftLIO $ LIO $ lift $ putStr $ replicate indent ' '
+                         liftLIO $ LIO $ lift $ putStrLn $ "Attempting to use delegation: " ++ show lab
+                         liftLIO $ LIO $ lift $ putStr $ replicate indent ' '
+                         liftLIO $ LIO $ lift $ putStrLn $ "Checking " ++ show (labelOf lab ⊔ l) ++ " ⊑ " ++ show clr
+                         liftLIO $ LIO $ lift $ putStr $ replicate indent ' '
+                         liftLIO $ LIO $ lift $ putStrLn $ "and " ++ show (labelOf lab) ++ " ⊑ " ++ show stratClr
+                         liftLIO $ LIO $ lift $ putStrLn ""
+                         (,) <$> labelOf lab ⊔ l ⊑ clr <*> labelOf lab ⊑ stratClr >>= \case
+                           (True, True) -> do
+                             liftLIO $ LIO $ lift $ putStr $ replicate indent ' '
+                             liftLIO $ LIO $ lift $ putStrLn "True!"
+                             liftLIO $ LIO $ lift $ putStrLn ""
+                             r <- unlabel lab
+                             return $ Just r
+                           _ -> do
+                             liftLIO $ LIO $ lift $ putStr $ replicate indent ' '
+                             liftLIO $ LIO $ lift $ putStrLn "False!"
+                             liftLIO $ LIO $ lift $ putStrLn ""
+                             return Nothing
+                       False -> return Nothing
                in do h' <- setFilterMapM f (unH h)
                      reach (p, q) h') strat
   return $ liftB r
@@ -455,15 +523,16 @@ p .≽ q =
   bot_ (p, q) <|||>
   top_ (p, q) <|||>
   refl (p, q) <|||>
-  proj (p, q) <|||>
-  projR (p, q) <|||>
-  own1 (p, q) <|||>
-  own2 (p, q) <|||>
-  conjL (p, q) <|||>
-  conjR (p, q) <|||>
-  disjL (p, q) <|||>
-  disjR (p, q) <|||>
-  del (p, q)
+  userChoice ["proj", "projR", "own1", "own2", "conjR", "disjL", "disjR", "conjL", "del"]
+  [ proj (p, q),
+    projR (p, q),
+    own1 (p, q),
+    own2 (p, q),
+    conjR (p, q),
+    disjL (p, q),
+    disjR (p, q),
+    conjL (p, q),
+    del (p, q) ]
 
 (≽) :: (MonadLIO H FLAM m, HasCache (Cache Principal) m) => (ToPrincipal a, ToPrincipal b) => a -> b -> m Bool
 p ≽ q = lowerB <$> normalize (p %) .≽. normalize (q %)

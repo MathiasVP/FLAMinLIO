@@ -1,14 +1,16 @@
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ExplicitForAll, ScopedTypeVariables #-}
-{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses, TemplateHaskell, FunctionalDependencies, LambdaCase, TypeFamilies #-}
+{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses, TemplateHaskell, FunctionalDependencies, LambdaCase, TypeFamilies, LiberalTypeSynonyms #-}
 module LIO where
 
 import Control.Monad.State
 import Data.IORef
 import Control.Lens
 import Control.Monad.State.Class
+import GHC.Stack
 
 {- We need to seperate these two classes in order to call (⊔) and (⊔)
    without getting an ambiguity error since these two functions
@@ -88,14 +90,13 @@ data Labeled l a = Labeled { _labeledLab :: l, _labeledVal :: a }
 
 makeLenses ''Labeled
 
-raise :: (MonadLIO s l m, Label s l, HasCache (St l) m) => l -> m ()
-raise l = do
+raise :: (MonadLIO s l m, Label s l, HasCache (St l) m) => String -> l -> m ()
+raise msg l = do
   l' <- liftLIO $ gets $ view _1
-  s <- getState
   b <- view cur l' ⊔ l ⊑ view clearance l'
   unless b $
-    fail ("IFC violation (raise): " ++
-           show (view cur l' ⊔ l) ++
+    fail ("IFC violation (" ++ msg ++ "): " ++
+           show (view cur l') ++ " ⊔ " ++ show l  ++
            " ⊑ " ++ show (view clearance l'))
   liftLIO $ modify $ over (_1 . cur) (l ⊔)
   
@@ -129,7 +130,7 @@ label l x = do
 
 unlabel :: (MonadLIO s l m, Label s l, HasCache (St l) m) => Labeled l a -> m a
 unlabel lab = do
-  raise (labelOf lab)
+  raise "unlabel" (labelOf lab)
   return (view labeledVal lab)
 
 toLabeled :: (MonadLIO s l m, Label s l, HasCache (St l) m) => l -> m a -> m (Labeled l a)
@@ -166,7 +167,7 @@ newRef l x = do
 
 readRef :: (MonadLIO s l m, Label s l, HasCache (St l) m) => LIORef l a -> m a
 readRef (LIORef lref) =
-  raise (labelOf lref) >> unlabel lref >>= \r -> do
+  raise "readRef" (labelOf lref) >> unlabel lref >>= \r -> do
   liftLIO . LIO . StateT $ \s -> do
     x <- readIORef r
     return (x, s)
