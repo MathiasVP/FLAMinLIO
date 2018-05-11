@@ -348,7 +348,7 @@ askUser = do
   getLine >>= \case
     "y" -> return True
     "n" -> return False
-    _ -> putStrLn "Please answer 'y' or 'n'." >> askUser
+    _ -> askUser
 
 ifUserChooses s m = do
   b <- liftLIO $ LIO $ lift $ do
