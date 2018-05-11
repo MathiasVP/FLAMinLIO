@@ -47,7 +47,6 @@ counter :: IORef Int
 {-# NOINLINE counter #-}
 counter = unsafePerformIO (newIORef 0)
 
-
 data Principal
   = (:⊤)
   | (:⊥)
@@ -523,16 +522,16 @@ p .≽ q =
   bot_ (p, q) <|||>
   top_ (p, q) <|||>
   refl (p, q) <|||>
-  userChoice ["proj", "projR", "own1", "own2", "conjR", "disjL", "disjR", "conjL", "del"]
-  [ proj (p, q),
+  userChoice ["del", "proj", "projR", "own1", "own2", "conjR", "disjL", "disjR", "conjL"]
+  [ del (p, q),
+    proj (p, q),
     projR (p, q),
     own1 (p, q),
     own2 (p, q),
     conjR (p, q),
     disjL (p, q),
     disjR (p, q),
-    conjL (p, q),
-    del (p, q) ]
+    conjL (p, q) ]
 
 (≽) :: (MonadLIO H FLAM m, HasCache (Cache Principal) m) => (ToPrincipal a, ToPrincipal b) => a -> b -> m Bool
 p ≽ q = lowerB <$> normalize (p %) .≽. normalize (q %)
