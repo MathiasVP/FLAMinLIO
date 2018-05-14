@@ -98,51 +98,51 @@ execBank = flip execStateT Map.empty . unBankT
 
 example :: FLAMIO Bank
 example = execBank $ do
-  lift $ setStrategy []
-  
-  addRole "Customer"  
-  addRole "Manager"
-  addRole "Director"
+  strategy [] $ do
+    addRole "Customer"  
+    addRole "Manager"
+    addRole "Director"
 
-  addCustomer "Charlie"
-  addCustomer "Chloe"
-  addCustomer "Charlotte"
-  addCustomer "Paige"
+    addCustomer "Charlie"
+    addCustomer "Chloe"
+    addCustomer "Charlotte"
+    addCustomer "Paige"
 
-  createAccount "Charlie"
-  createAccount "Chloe"
-  createAccount "Charlotte"
-  createAccount "Paige"
+    createAccount "Charlie"
+    createAccount "Chloe"
+    createAccount "Charlotte"
+    createAccount "Paige"
 
-  addAccountManager "Matt"
-  addAccountManager "Michael"
+    addAccountManager "Matt"
+    addAccountManager "Michael"
   
-  addDirector "David"
+    addDirector "David"
   
-  assignAccountManager "Matt" "Charlie"
-  assignAccountManager "Michael" "Chloe"
-  assignAccountManager "Michael" "Charlotte"
-  assignAccountManager "Matt" "Paige"
+    assignAccountManager "Matt" "Charlie"
+    assignAccountManager "Michael" "Chloe"
+    assignAccountManager "Michael" "Charlotte"
+    assignAccountManager "Matt" "Paige"
 
   -- Matt is Charlie's account manager, so he can see the amount of money on Charlie's account
   liftLIO $ LIO $ lift $ putStrLn $ "----------------------------------------"
-  lift $ setStrategy [("Matt" %)]
-  asUser "Matt" $ do
-    Map.lookup "Charlie" <$> get >>= \case
-      Just amount -> do
-        a <- unlabel amount
-        {- ... -}
-        return ()
-      Nothing -> return ()
+  strategy [("Matt" %)] $ do
+    asUser "Matt" $ do
+      Map.lookup "Charlie" <$> get >>= \case
+        Just amount -> do
+          a <- unlabel amount
+          {- ... -}
+          return ()
+        Nothing -> return ()
+  
   -- Chloe is allowed to wire money from her own account to Charlotte
-  lift $ setStrategy []
-  asUser "Chloe" $ do
-    transfer "Chloe" "Charlotte" 10
-
+  strategy [] $ do
+    asUser "Chloe" $ do
+      transfer "Chloe" "Charlotte" 10
+  
   -- Michael is the manager of Chloe's account, so he can move money from Chloe to Charlie
-  lift $ setStrategy [("Michael" %)]
-  asUser "Michael" $ do
-    transfer "Chloe" "Charlie" 20
+  strategy [("Michael" %)] $ do
+    asUser "Michael" $ do
+      transfer "Chloe" "Charlie" 20
     
   -- Charlie is not allowed to transfer money from Charlotte to his own account!
   {-liftLIO $ setStrategy []
@@ -152,4 +152,4 @@ example = execBank $ do
 runExample :: IO Bank
 runExample =
   evalStateT (unLIO (runFLAM example))
-  (BoundedLabel { _cur = bot, _clearance = top }, H Set.empty, [])
+  (BoundedLabel { _cur = bot, _clearance = top }, [H Set.empty], [])
