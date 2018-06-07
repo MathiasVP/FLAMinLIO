@@ -734,10 +734,6 @@ top = (:→) (:⊤) :/\ (:←) (:⊥)
 newtype FLAMIO a = FLAMIO { unFLAMIO :: StateT (Cache Principal) (LIO H FLAM) a }
   deriving (Functor, Applicative, Monad)
 
-{-instance HasCache (Cache Principal) FLAMIO where
-  getCache = FLAMIO get
-  putCache = FLAMIO . put-}
-
 instance MonadLIO H FLAM FLAMIO where
   liftLIO = FLAMIO . liftLIO
 
