@@ -1,10 +1,25 @@
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE IncoherentInstances #-}
+{-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances, ViewPatterns, PostfixOperators, MultiParamTypeClasses, ExplicitForAll, ScopedTypeVariables, LambdaCase, MonadComprehensions, GeneralizedNewtypeDeriving, UndecidableInstances, DeriveGeneric #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE PostfixOperators #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ExplicitForAll #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MonadComprehensions #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 module FLAM where
 
+import BasicPrelude
 import LIO
 import TCB()
 import qualified Data.List as List
@@ -26,6 +41,9 @@ import Control.Lens.Tuple
 import Control.Lens
 import Algebra.PartialOrd
 import Control.Monad.Extra
+
+import Control.Monad.Catch
+import qualified Network.Simple.TCP as Net
 
 listview :: Ord a => Set a -> [a]
 listview = Set.toList
@@ -765,6 +783,64 @@ newScope m = do
 runFLAM :: FLAMIO a -> LIO H FLAM a
 runFLAM a = evalStateT (unFLAMIO a) emptyCache
 
+{- Networking stuff -}
+class Serializable a where
+  encode :: a -> ByteString
+  decode :: ByteString -> Maybe a
+  maxSize :: a -> Int
+  
+data LSocket a where
+  LSocket :: Serializable a => (Net.Socket, String) -> LSocket a
+type IP = String
+type Name = String
+type Port = String
+type Host = (IP, Port, Name)
+
+instance (Monad m, Label s l, MonadLIO s l m) => MonadIO m where
+  liftIO x = liftLIO $ LIO $ StateT $ \s -> do
+    y <- x
+    return (y, s)
+  
+serve :: (Serializable a, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => Host -> (LSocket a -> m ()) -> m ()
+serve (ip, port, name) f =
+  Net.listen (Net.Host ip) port (\(socket, addr) -> Net.accept socket (\(socket', _) -> f (LSocket (socket', name))))
+
+connect :: (Serializable a, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => Host -> (LSocket a -> m r)
+        -> m (Labeled Principal r)
+connect (ip, port, name) f = do
+  x <- Net.connect ip port (\(socket, _) -> f (LSocket (socket, name)))
+  label (name %) x
+
+send :: (MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => LSocket a -> a -> m ()
+send (LSocket (s, name)) a = Net.send s (encode a)
+
+recv :: forall m a . (MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => LSocket a -> m (Labeled Principal (Maybe a))
+recv (LSocket (s, name)) =
+  Net.recv s (maxSize (undefined :: a)) >>= \case
+    Nothing -> label (name %) Nothing
+    Just x -> case decode x of
+      Nothing -> label (name %) Nothing
+      Just y -> label (name %) (Just y)
+
+instance MonadThrow FLAMIO where
+  throwM = FLAMIO . throwM
+
+instance MonadCatch FLAMIO where
+  catch (FLAMIO m) f = FLAMIO $ catch m (unFLAMIO . f)
+
+instance MonadMask FLAMIO where
+  mask a = FLAMIO $ mask $ \u -> unFLAMIO (a $ q u)
+    where q u (FLAMIO b) = FLAMIO (u b)
+
+  uninterruptibleMask a = FLAMIO $ uninterruptibleMask $ \u -> unFLAMIO (a $ q u)
+    where q u (FLAMIO b) = FLAMIO (u b)
+
+  generalBracket acquire release use = FLAMIO $ generalBracket
+    (unFLAMIO acquire)
+    (\resource exitCase -> unFLAMIO (release resource exitCase))
+    (\resource -> unFLAMIO (use resource))
+    
+{- Nice abstractions -}
 class Monad m => MonadFLAMIO m where
   liftFLAMIO :: FLAMIO a -> m a
 

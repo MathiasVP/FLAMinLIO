@@ -9,6 +9,7 @@ import Control.Monad.State
 import Data.IORef
 import Control.Lens
 import Control.Monad.State.Class
+import Control.Monad.Catch
 
 {- We need to seperate these two classes in order to call (⊔) and (⊔)
    without getting an ambiguity error since these two functions
@@ -201,3 +202,23 @@ writeRef (LIORef lref) x = do
 
 (.=) :: (MonadLIO s l m, Label s l, HasCache (St l) m) => LIORef l a -> a -> m ()
 (.=) = writeRef
+
+{- These weird instances are needed for networking -}
+
+instance Label s l => MonadThrow (LIO s l) where
+  throwM = LIO . throwM
+
+instance Label s l => MonadCatch (LIO s l) where
+  catch (LIO m) f = LIO $ catch m (unLIO . f)
+
+instance Label s l => MonadMask (LIO s l) where
+  mask a = LIO $ mask $ \u -> unLIO (a $ q u)
+    where q u (LIO b) = LIO (u b)
+    
+  uninterruptibleMask a = LIO $ uninterruptibleMask $ \u -> unLIO (a $ q u)
+    where q u (LIO b) = LIO (u b)
+
+  generalBracket acquire release use = LIO $ generalBracket
+    (unLIO acquire)
+    (\resource exitCase -> unLIO (release resource exitCase))
+    (\resource -> unLIO (use resource))
