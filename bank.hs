@@ -41,10 +41,9 @@ transfer from to amount =
   gets (Map.lookup from) >>= \case
     Just account -> do
       balance <- lift $ unlabel account
-      if balance >= amount then do
+      when (balance >= amount) $ do
         from -= amount
         to += amount
-      else return ()
     Nothing -> return ()
 
 getBalance :: Customer -> BankT FLAMIO Balance
@@ -54,11 +53,11 @@ getBalance u =
     Nothing -> return 0
 
 addRole :: String -> BankT FLAMIO ()
-addRole role = lift $ addDelegate (("Bank" %), (role %)) bot
+addRole role = lift $ addDelegate ("Bank", role) bot
 
 addCustomer :: String -> BankT FLAMIO ()
 addCustomer customer =
-  lift $ addDelegate ((customer %), ("Customer" %)) bot
+  lift $ addDelegate ("Bank" .: customer, "Customer") bot
 
 createAccount :: String -> BankT FLAMIO ()
 createAccount customer = do
@@ -67,25 +66,22 @@ createAccount customer = do
 
 addAccountManager :: String -> BankT FLAMIO ()
 addAccountManager accountant =
-  lift $ addDelegate ((accountant %), ("Manager" %)) bot
+  lift $ addDelegate ("Bank" .: accountant, "Manager") bot
 
 addDirector :: String -> BankT FLAMIO ()
 addDirector dir = do
-  lift $ addDelegate ((dir %), ("Director" %)) (("Bank" ←) \/ ((:⊥) →))
+  lift $ addDelegate ("Bank" .: dir, "Director") bot
 
 assignAccountManager :: String -> String -> BankT FLAMIO () 
 assignAccountManager manager customer = do
-  lift $ addDelegate ((manager →), (customer →)) (manager \/ customer)
-  lift $ addDelegate ((customer ←), (manager ←)) (manager \/ customer)
+  let ℓ = (((manager \/ customer) →) \/ ((manager /\ customer) ←))
+  lift $ addDelegate ((manager →), (customer →)) ℓ
+  lift $ addDelegate ((customer ←), (manager ←)) ℓ
 
 asUser :: User -> BankT FLAMIO () -> BankT FLAMIO ()
 asUser u m = do
-  l <- getLabel
-  clr <- getClearance
-  liftLIO $ modify $ _1 . clearance .~ (u %)
-  _ <- m
-  liftLIO $ modify $ _1 . cur .~ l
-  liftLIO $ modify $ _1 . clearance .~ clr
+  toLabeled_ (u %) m
+  return ()
 
 runBank :: BankT FLAMIO a -> FLAMIO (a, Bank)
 runBank = flip runStateT Map.empty . unBankT
@@ -98,7 +94,7 @@ execBank = flip execStateT Map.empty . unBankT
 
 example :: FLAMIO Bank
 example = execBank $ do
-  strategy [] $ do
+  withStrategy noStrategy $ do
     addRole "Customer"  
     addRole "Manager"
     addRole "Director"
@@ -106,12 +102,10 @@ example = execBank $ do
     addCustomer "Charlie"
     addCustomer "Chloe"
     addCustomer "Charlotte"
-    addCustomer "Paige"
 
     createAccount "Charlie"
     createAccount "Chloe"
     createAccount "Charlotte"
-    createAccount "Paige"
 
     addAccountManager "Matt"
     addAccountManager "Michael"
@@ -121,11 +115,9 @@ example = execBank $ do
     assignAccountManager "Matt" "Charlie"
     assignAccountManager "Michael" "Chloe"
     assignAccountManager "Michael" "Charlotte"
-    assignAccountManager "Matt" "Paige"
 
   -- Matt is Charlie's account manager, so he can see the amount of money on Charlie's account
-  liftLIO $ LIO $ lift $ putStrLn $ "----------------------------------------"
-  strategy [("Matt" %)] $ do
+  withStrategy ["Matt"] $ do
     asUser "Matt" $ do
       Map.lookup "Charlie" <$> get >>= \case
         Just amount -> do
@@ -133,23 +125,30 @@ example = execBank $ do
           {- ... -}
           return ()
         Nothing -> return ()
-  
+
   -- Chloe is allowed to wire money from her own account to Charlotte
-  strategy [] $ do
-    asUser "Chloe" $ do
-      transfer "Chloe" "Charlotte" 10
+  asUser "Chloe" $ do
+    transfer "Chloe" "Charlotte" 10
   
   -- Michael is the manager of Chloe's account, so he can move money from Chloe to Charlie
-  strategy [("Michael" %)] $ do
+  withStrategy ["Michael"] $ do
     asUser "Michael" $ do
       transfer "Chloe" "Charlie" 20
-    
+
+  -- Charlie asks Chloe to take out 10 dollars from his account and give it to Charlotte
+  -- So Charlie temporarily gives authority to Chloe
+  newScope $ do
+    withStrategy [bot] $ do
+      asUser "Charlie" $ addDelegate ("Chloe", "Charlie") bot
+      asUser "Chloe" $ transfer "Charlie" "Charlotte" 10
+  
   -- Charlie is not allowed to transfer money from Charlotte to his own account!
-  {-liftLIO $ setStrategy []
-  asUser "Charlie" $ do
-    transfer "Charlotte" "Charlie" 30-}
+  -- Thows IFC error, as required.
+  {-strategy [] $ do
+    asUser "Charlie" $ do
+      transfer "Charlotte" "Charlie" 30-}
 
 runExample :: IO Bank
 runExample =
   evalStateT (unLIO (runFLAM example))
-  (BoundedLabel { _cur = bot, _clearance = top }, [H Set.empty], [])
+  (BoundedLabel { _cur = bot, _clearance = top }, H Set.empty, [])

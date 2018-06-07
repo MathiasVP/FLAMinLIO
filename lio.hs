@@ -114,7 +114,7 @@ infixr 8 <&&>
 infixr 7 <||>
 
 (∈) :: (MonadLIO s l m, Label s l, HasCache (St l) m) => l -> BoundedLabel l -> m Bool
-(∈) l lab = (view cur lab ⊑ l) <&&> (l ⊑ view clearance lab)
+(∈) l lab = view cur lab ⊑ l <&&> l ⊑ view clearance lab
 
 label :: (MonadLIO s l m, Label s l, HasCache (St l) m) => l -> a -> m (Labeled l a)
 label l x = do
@@ -142,6 +142,16 @@ toLabeled l m = do
     fail ("IFC violation (toLabeled): " ++ show l'' ++ " ⊑ " ++ show l)
   liftLIO $ modify $ (_1 .~ l')
   label l res
+
+toLabeled_ :: (MonadLIO s l m, Label s l, HasCache (St l) m) => l -> m a -> m ()
+toLabeled_ l m = do
+  l' <- liftLIO $ gets $ view _1
+  res <- m
+  l'' <- liftLIO $ gets $ view $ _1 . cur
+  b <- l'' ⊑ l
+  unless b $ do
+    fail ("IFC violation (toLabeled_): " ++ show l'' ++ " ⊑ " ++ show l)
+  liftLIO $ modify $ (_1 .~ l')
 
 getStrategy :: (MonadLIO s l m, Label s l, HasCache (St l) m) => m (Strategy l)
 getStrategy = liftLIO $ gets $ view _3
