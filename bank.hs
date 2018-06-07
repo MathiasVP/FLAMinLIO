@@ -19,10 +19,9 @@ type Bank = Map Customer (Labeled Principal Balance)
 newtype BankT m a = BankT { unBankT :: StateT Bank m a }
   deriving (Functor, Applicative, Monad, MonadState Bank, MonadTrans)
 
-instance HasCache (Cache Principal) (BankT FLAMIO) where
-  getCache = BankT getCache
-  putCache = BankT . putCache
-
+instance MonadFLAMIO (BankT FLAMIO) where
+  liftFLAMIO = lift
+  
 instance (Label s l, MonadLIO s l m) => MonadLIO s l (BankT m) where
   liftLIO = BankT . liftLIO
   

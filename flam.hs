@@ -716,9 +716,9 @@ top = (:→) (:⊤) :/\ (:←) (:⊥)
 newtype FLAMIO a = FLAMIO { unFLAMIO :: StateT (Cache Principal) (LIO H FLAM) a }
   deriving (Functor, Applicative, Monad)
 
-instance HasCache (Cache Principal) FLAMIO where
+{-instance HasCache (Cache Principal) FLAMIO where
   getCache = FLAMIO get
-  putCache = FLAMIO . put
+  putCache = FLAMIO . put-}
 
 instance MonadLIO H FLAM FLAMIO where
   liftLIO = FLAMIO . liftLIO
@@ -764,3 +764,13 @@ newScope m = do
 
 runFLAM :: FLAMIO a -> LIO H FLAM a
 runFLAM a = evalStateT (unFLAMIO a) emptyCache
+
+class Monad m => MonadFLAMIO m where
+  liftFLAMIO :: FLAMIO a -> m a
+
+instance MonadFLAMIO FLAMIO where
+  liftFLAMIO = id
+
+instance MonadFLAMIO m => HasCache (Cache Principal) m where
+  getCache = liftFLAMIO $ FLAMIO get
+  putCache = liftFLAMIO . FLAMIO . put
