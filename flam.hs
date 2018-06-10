@@ -16,10 +16,8 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE NoImplicitPrelude #-}
 module FLAM where
 
-import BasicPrelude
 import LIO
 import TCB()
 import qualified Data.List as List
@@ -43,6 +41,11 @@ import Algebra.PartialOrd
 import Control.Monad.Extra
 
 import Control.Monad.Catch
+
+import qualified Data.Binary as Bin
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Char8 as B8
 import qualified Network.Simple.TCP as Net
 
 listview :: Ord a => Set a -> [a]
@@ -781,8 +784,8 @@ runFLAM a = evalStateT (unFLAMIO a) emptyCache
 
 {- Networking stuff -}
 class Serializable a where
-  encode :: a -> ByteString
-  decode :: ByteString -> Maybe a
+  encode :: a -> B.ByteString
+  decode :: B.ByteString -> Maybe a
   maxSize :: a -> Int
   
 data LSocket a where
@@ -797,7 +800,7 @@ instance (Monad m, Label s l, MonadLIO s l m) => MonadIO m where
     y <- x
     return (y, s)
   
-serve :: (Serializable a, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => Host -> (LSocket a -> m ()) -> m ()
+serve :: (Serializable a, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => Host -> (LSocket a -> m r) -> m r
 serve (ip, port, name) f =
   Net.listen (Net.Host ip) port (\(socket, addr) -> Net.accept socket (\(socket', _) -> f (LSocket (socket', name))))
 
@@ -808,7 +811,15 @@ connect (ip, port, name) f = do
   label (name %) x
 
 send :: (MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => LSocket a -> a -> m ()
-send (LSocket (s, name)) a = Net.send s (encode a)
+send (LSocket (s, name)) a = do
+  lab <- liftLIO $ gets $ view _1
+  b <- (name %) ∈ lab
+  unless b $
+    fail ("IFC violation: " ++
+           show (view cur lab) ++
+           " ⊑ " ++ name ++
+           " ⊑ " ++ show (view clearance lab))
+  Net.send s (encode a)
 
 recv :: forall m a . (MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => LSocket a -> m (Labeled Principal (Maybe a))
 recv (LSocket (s, name)) =
@@ -835,6 +846,77 @@ instance MonadMask FLAMIO where
     (unFLAMIO acquire)
     (\resource exitCase -> unFLAMIO (release resource exitCase))
     (\resource -> unFLAMIO (use resource))
+
+
+{- Serialization instances for common types -}
+instance Serializable Int where
+  encode = BL.toStrict . Bin.encode
+  decode x =
+    case Bin.decodeOrFail (BL.fromStrict x) of
+      Right (_, _, r) -> Just r
+      _ -> Nothing
+  maxSize _ = 8
+
+instance Serializable Bool where
+  encode = BL.toStrict . Bin.encode
+  decode x = case Bin.decodeOrFail (BL.fromStrict x) of
+      Right (_, _, r) -> Just r
+      _ -> Nothing
+  maxSize _ = 1
+
+instance (Serializable a, Serializable b) => Serializable (a, b) where
+  encode (a, b) = alen `B.append` a' `B.append` b'
+    where a' = encode a
+          b' = encode b
+          alen = encode $ B.length a'
+  decode bs =
+    let (alen, rest) = B.splitAt (maxSize (undefined :: Int)) bs
+    in case decode alen of
+         Just (n :: Int) ->
+           let (a, b) = B.splitAt n rest
+           in case (decode a, decode b) of
+                (Just a, Just b) -> Just (a, b)
+                _ -> Nothing
+         _ -> Nothing
+          
+  maxSize _ = maxSize (undefined :: Int) +
+              maxSize (undefined :: a) +
+              maxSize (undefined :: b)
+
+instance Serializable String where
+  encode = B8.pack
+  decode = Just . B8.unpack
+  maxSize _ = 1024
+
+instance Serializable Principal where
+  encode (:⊤) = B.singleton 0
+  encode (:⊥) = B.singleton 1
+  encode (Name s) = B.cons 2 (encode s)
+  encode (p1 :/\ p2) = B.cons 3 (encode (p1, p2))
+  encode (p1 :\/ p2) = B.cons 4 (encode (p1, p2))
+  encode ((:→) p) = B.cons 5 (encode p)
+  encode ((:←) p) = B.cons 6 (encode p)
+  encode (p1 ::: p2) = B.cons 7 (encode (p1, p2))
+
+  decode bs =
+    case B.uncons bs of
+      Just (0, _) -> Just (:⊤)
+      Just (1, _) -> Just (:⊥)
+      Just (2, bs') -> Name <$> decode bs'
+      Just (3, bs') -> uncurry (:/\) <$> decode bs
+      Just (4, bs') -> uncurry (:\/) <$> decode bs
+      Just (5, bs') -> (:→) <$> decode bs'
+      Just (6, bs') -> (:←) <$> decode bs'
+      Just (7, bs') -> uncurry (:::) <$> decode bs
+      _ -> Nothing
+
+  maxSize _ = 1024
+  
+instance Serializable a => Serializable (Labeled FLAM a) where
+  encode (Labeled l a) = encode (l, a)
+  decode bs = uncurry Labeled <$> decode bs
+  maxSize _ = maxSize (undefined :: FLAM, undefined :: a)
+
     
 {- Nice abstractions -}
 class Monad m => MonadFLAMIO m where
