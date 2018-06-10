@@ -800,10 +800,11 @@ instance (Monad m, Label s l, MonadLIO s l m) => MonadIO m where
     y <- x
     return (y, s)
   
-serve :: (Serializable a, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => Host -> (LSocket a -> m r) -> m r
-serve (ip, port, name) f =
-  Net.listen (Net.Host ip) port (\(socket, addr) -> Net.accept socket (\(socket', _) -> f (LSocket (socket', name))))
-
+serve :: (Serializable a, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => Host -> (LSocket a -> m r) -> m (Labeled Principal r)
+serve (ip, port, name) f = do
+  x <- Net.listen (Net.Host ip) port (\(socket, addr) -> Net.accept socket (\(socket', _) -> f (LSocket (socket', name))))
+  label (name %) x
+  
 connect :: (Serializable a, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => Host -> (LSocket a -> m r)
         -> m (Labeled Principal r)
 connect (ip, port, name) f = do
@@ -917,7 +918,6 @@ instance Serializable a => Serializable (Labeled FLAM a) where
   decode bs = uncurry Labeled <$> decode bs
   maxSize _ = maxSize (undefined :: FLAM, undefined :: a)
 
-    
 {- Nice abstractions -}
 class Monad m => MonadFLAMIO m where
   liftFLAMIO :: FLAMIO a -> m a
@@ -928,3 +928,6 @@ instance MonadFLAMIO FLAMIO where
 instance MonadFLAMIO m => HasCache (Cache Principal) m where
   getCache = liftFLAMIO $ FLAMIO get
   putCache = liftFLAMIO . FLAMIO . put
+
+instance MonadFLAMIO m => MonadFLAMIO (StateT s m) where
+ liftFLAMIO = lift . liftFLAMIO
