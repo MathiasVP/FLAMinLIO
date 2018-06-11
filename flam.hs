@@ -210,10 +210,6 @@ mapMaybeKeepM f (mapview -> Just ((k, a), m)) = do
   f a >>= \case
     Just b -> return (m1, Map.insert k b m2)
     Nothing -> return (Map.insert k a m1, m2)
-
-instance HasCache c m => HasCache c (ReaderT r m) where
-  getCache = lift getCache
-  putCache = lift . putCache
   
 update :: forall m . (MonadLIO H FLAM m, HasCache (Cache Principal) m) => (Principal, Principal) -> (Principal, Principal) -> QueryResult Principal -> m ()
 update (cur, clr) (p, q) Success = do
