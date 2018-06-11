@@ -1,8 +1,8 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE StandaloneDeriving #-}
-module TCB where
+module Lib.TCB where
 
-import LIO
+import Lib.LIO
 import Control.Monad.IO.Class
 
 deriving instance (Eq l, Eq a) => Eq (Labeled l a)

@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleInstances #-}
-module DC where
+module Lib.DC where
 
-import LIO
+import Lib.LIO
 import qualified Data.Set as Set
 import Data.Set(Set)
 import qualified Test.QuickCheck as QC

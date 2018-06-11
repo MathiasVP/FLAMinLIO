@@ -2,8 +2,8 @@
 {-# LANGUAGE LambdaCase, PostfixOperators, GeneralizedNewtypeDeriving #-}
 
 module Bank where
-import FLAM
-import LIO
+import Lib.FLAM
+import Lib.LIO
 import qualified Data.Set as Set
 import qualified Data.Map as Map
 import Data.Map(Map)

@@ -15,10 +15,10 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DeriveGeneric #-}
-module FLAM where
+module Lib.FLAM where
 
-import LIO
-import TCB()
+import Lib.LIO
+import Lib.TCB()
 import qualified Data.List as List
 import qualified Data.Map.Strict as Map
 import Data.Map(Map)

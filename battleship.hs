@@ -1,9 +1,8 @@
 {-# LANGUAGE ScopedTypeVariables, GeneralizedNewtypeDeriving, LambdaCase #-}
 
 module Battleship where
-import FLAM
-import LIO
-import TCB
+import Lib.FLAM
+import Lib.LIO
 import qualified Data.List as List
 import qualified Data.ByteString as B
 import Control.Monad.State

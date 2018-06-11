@@ -1,8 +1,8 @@
 {-# LANGUAGE ScopedTypeVariables, LambdaCase, PostfixOperators #-}
 
 module Network where
-import FLAM
-import LIO
+import Lib.FLAM
+import Lib.LIO
 import Control.Monad.State
 import Battleship
 import qualified Data.Set as Set

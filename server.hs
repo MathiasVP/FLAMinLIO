@@ -1,8 +1,9 @@
 {-# LANGUAGE ScopedTypeVariables, LambdaCase #-}
+{-# OPTIONS_GHC -v #-}
 
-module Network where
-import FLAM
-import LIO
+module Example.Network where
+import Lib.FLAM
+import Lib.LIO
 import Control.Monad.State
 import Battleship
 import qualified Data.Set as Set

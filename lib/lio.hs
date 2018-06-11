@@ -2,7 +2,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ExplicitForAll, ScopedTypeVariables #-}
 {-# LANGUAGE FlexibleInstances, MultiParamTypeClasses, TemplateHaskell, FunctionalDependencies, LambdaCase, TypeFamilies, LiberalTypeSynonyms #-}
-module LIO where
+module Lib.LIO where
 
 import Control.Monad.State
 import Data.IORef

@@ -1,6 +1,6 @@
-module LH where
+module Lib.LH where
 
-import LIO
+import Lib.LIO
 
 data LH = L | H
   deriving Show
