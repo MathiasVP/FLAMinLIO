@@ -210,6 +210,10 @@ mapMaybeKeepM f (mapview -> Just ((k, a), m)) = do
   f a >>= \case
     Just b -> return (m1, Map.insert k b m2)
     Nothing -> return (Map.insert k a m1, m2)
+
+instance HasCache c m => HasCache c (ReaderT r m) where
+  getCache = lift getCache
+  putCache = lift . putCache
   
 update :: forall m . (MonadLIO H FLAM m, HasCache (Cache Principal) m) => (Principal, Principal) -> (Principal, Principal) -> QueryResult Principal -> m ()
 update (cur, clr) (p, q) Success = do
@@ -440,10 +444,10 @@ atomize s = Set.fromList
 transitive :: (Ord a, Eq a) => Set (a, a) -> Set (a, a)
 transitive s
   | s == s' = s
-  | otherwise  = transitive s'
+  | otherwise = transitive s'
   where s' = s `Set.union` Set.fromList [(a, c) | (a, b) <- Set.toList s, (b', c) <- Set.toList s, b == b']
 
-{- Join of meets into Meet of joins -}
+{- Join of meets into meet of joins -}
 (⊗) :: J -> Set J
 (⊗) (J ms) = Set.fromList
              [J . Set.fromList $ map mkM ps |
