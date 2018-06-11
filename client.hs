@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables, LambdaCase #-}
+{-# LANGUAGE ScopedTypeVariables, LambdaCase, PostfixOperators #-}
 
 module Network where
 import FLAM
@@ -22,7 +22,7 @@ ships = [ship1, ship2, ship3, ship4, ship5, ship6, ship7, ship8]
 example :: FLAMIO ()
 example = do
   connect ("127.0.0.1", "8000", "Server") $ \(socket :: LSocket Msg) -> do
-    evalBattleshipT (forever $ attack socket >> await socket) ships
+    evalBattleshipT (attack socket) ships
   return ()
 
 runExample :: IO ()

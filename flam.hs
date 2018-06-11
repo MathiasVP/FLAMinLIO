@@ -1,5 +1,4 @@
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE IncoherentInstances #-}
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -492,7 +491,7 @@ instance Label H Principal where
   p ⊑ q = ((q →) /\ (p ←)) ≽ ((p →) /\ (q ←))
 
 instance MonadLIO s l m => MonadLIO s l (ReaderT r m) where
-  liftLIO x = lift (liftLIO x)
+  liftLIO = lift . liftLIO
   
 mSingleton :: L -> M
 mSingleton = M . Set.singleton
@@ -739,10 +738,6 @@ newtype FLAMIO a = FLAMIO { unFLAMIO :: StateT (Cache Principal) (LIO H FLAM) a 
 
 instance MonadLIO H FLAM FLAMIO where
   liftLIO = FLAMIO . liftLIO
-
-instance HasCache (Cache l) m => HasCache (Cache l) (StateT s m) where
-  getCache = lift getCache
-  putCache = lift . putCache
   
 addDelegate :: (MonadLIO H FLAM m, HasCache (Cache Principal) m, ToPrincipal a, ToPrincipal b, ToPrincipal c) =>
                (a, b) -> c -> m ()
@@ -782,6 +777,9 @@ newScope m = do
 runFLAM :: FLAMIO a -> LIO H FLAM a
 runFLAM a = evalStateT (unFLAMIO a) emptyCache
 
+instance MonadIO FLAMIO where
+  liftIO = FLAMIO . liftIO
+
 {- Networking stuff -}
 class Serializable a where
   encode :: a -> B.ByteString
@@ -794,24 +792,19 @@ type IP = String
 type Name = String
 type Port = String
 type Host = (IP, Port, Name)
-
-instance (Monad m, Label s l, MonadLIO s l m) => MonadIO m where
-  liftIO x = liftLIO $ LIO $ StateT $ \s -> do
-    y <- x
-    return (y, s)
   
-serve :: (Serializable a, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => Host -> (LSocket a -> m r) -> m (Labeled Principal r)
+serve :: (MonadIO m, Serializable a, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => Host -> (LSocket a -> m r) -> m (Labeled Principal r)
 serve (ip, port, name) f = do
   x <- Net.listen (Net.Host ip) port (\(socket, addr) -> Net.accept socket (\(socket', _) -> f (LSocket (socket', name))))
   label (name %) x
   
-connect :: (Serializable a, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => Host -> (LSocket a -> m r)
+connect :: (MonadIO m, Serializable a, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => Host -> (LSocket a -> m r)
         -> m (Labeled Principal r)
 connect (ip, port, name) f = do
   x <- Net.connect ip port (\(socket, _) -> f (LSocket (socket, name)))
   label (name %) x
 
-send :: (MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => LSocket a -> a -> m ()
+send :: (MonadIO m, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => LSocket a -> a -> m ()
 send (LSocket (s, name)) a = do
   lab <- liftLIO $ gets $ view _1
   b <- (name %) ∈ lab
@@ -822,7 +815,7 @@ send (LSocket (s, name)) a = do
            " ⊑ " ++ show (view clearance lab))
   Net.send s (encode a)
 
-recv :: forall m a . (MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => LSocket a -> m (Labeled Principal (Maybe a))
+recv :: forall m a . (MonadIO m, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => LSocket a -> m (Labeled Principal (Maybe a))
 recv (LSocket (s, name)) =
   Net.recv s (maxSize (undefined :: a)) >>= \case
     Nothing -> label (name %) Nothing

@@ -23,7 +23,9 @@ ships = [ship1, ship2, ship3, ship4, ship5, ship6, ship7, ship8]
 example :: FLAMIO ()
 example = do
   serve ("127.0.0.1", "8000", "Client") $ \(socket :: LSocket Msg) -> do
-    evalBattleshipT (forever $ await socket >> attack socket) ships
+    recv socket >>= \case
+      
+    evalBattleshipT (await socket) ships
   return ()
 
 runExample :: IO ()

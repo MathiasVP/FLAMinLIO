@@ -26,13 +26,13 @@ type Strategy l = [l]
 
 newtype LIO s l a = LIO { unLIO :: StateT (BoundedLabel l, s, Strategy l) IO a }
 
-class Monad m => MonadLIO s l m | m -> s l where
+class (Monad m, Label s l) => MonadLIO s l m | m -> s l where
   liftLIO :: LIO s l a -> m a
 
 instance Label s l => MonadLIO s l (LIO s l) where
   liftLIO = id
 
-instance (Label s l, MonadLIO s l m) => MonadLIO s l (StateT st m) where
+instance MonadLIO s l m => MonadLIO s l (StateT st m) where
   liftLIO m = StateT $ \st -> do
     x <- liftLIO m
     return (x, st)
