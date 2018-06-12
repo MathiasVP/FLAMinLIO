@@ -118,41 +118,46 @@ attack socket = do
   x <- liftIO (read <$> getLine)
   liftIO $ putStr "> y = "
   y <- liftIO (read <$> getLine)
-  send socket $ Attack (r x, c y)
+  send socket bot $ Attack (r x, c y)
   done <-
-    lift (recv socket) >>= unlabel >>= \case
-      Just Hit -> do
-        liftIO $ putStrLn "Hit!"
-        addHit ((r x, c y), True)
-        return False
-      Just Miss -> do
-        liftIO $ putStrLn "Miss!"
-        addHit ((r x, c y), False)
-        return False
-      Just YouSankMyBattleship -> do
-        liftIO $ putStrLn "You sank my battleship!"
-        addHit ((r x, c y), True)
-        return True
-      Just msg -> error $ "Unexpected message: " ++ show msg
+    lift (recv socket) >>= \case
+      Just lb -> unlabel lb >>= \case
+        Hit -> do
+          liftIO $ putStrLn "Hit!"
+          addHit ((r x, c y), True)
+          return False
+        Miss -> do
+          liftIO $ putStrLn "Miss!"
+          addHit ((r x, c y), False)
+          return False
+        YouSankMyBattleship -> do
+          liftIO $ putStrLn "You sank my battleship!"
+          addHit ((r x, c y), True)
+          return True
+        msg -> error $ "Unexpected message: " ++ show msg
+      Nothing -> error "Error receiving message!"
   renderTheirs >>= liftIO . putStrLn
   unless done $ await socket
 
 await :: LSocket Msg -> BattleshipT FLAMIO ()
 await socket = do
   done <-
-    lift (recv socket) >>= unlabel >>= \case
-      Just (Attack (x, y)) -> do
-        liftIO $ putStrLn $ (show x ++ ", " ++ show y) ++ " was attacked!"
-        hasShip (x, y) >>= \case
-          True -> do
-            clear (x, y)
-            alive >>= \case
-              True -> do send socket Hit
-                         return False
-              False -> do send socket YouSankMyBattleship
-                          return True
-          False -> do send socket Miss
-                      return False
-      Just msg -> error $ "Unexpected message: " ++ show msg
+    lift (recv socket) >>= \case
+      Just lb -> do
+        unlabel lb >>= \case
+          Attack (x, y) -> do
+            liftIO $ putStrLn $ (show x ++ ", " ++ show y) ++ " was attacked!"
+            hasShip (x, y) >>= \case
+              True -> do
+                clear (x, y)
+                alive >>= \case
+                  True -> do send socket bot Hit
+                             return False
+                  False -> do send socket bot YouSankMyBattleship
+                              return True
+              False -> do send socket bot Miss
+                          return False
+          msg -> error $ "Unexpected message: " ++ show msg
+      Nothing -> error "Error receiving message!"
   renderOwn >>= liftIO . putStrLn
   unless done $ attack socket

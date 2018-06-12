@@ -804,24 +804,31 @@ connect (ip, port, name) f = do
   x <- Net.connect ip port (\(socket, _) -> f (LSocket (socket, name)))
   label (name %) x
 
-send :: (MonadIO m, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => LSocket a -> a -> m ()
-send (LSocket (s, name)) a = do
+{- Is it really bad to send to a principal above your clearance? If we did not have this, the battleship example could avoid adding the delegations -}
+send :: (MonadIO m, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m, ToPrincipal c) => LSocket a -> c -> a -> m ()
+send (LSocket (s, name)) me a = do
   lab <- liftLIO $ gets $ view _1
   b <- (name %) ∈ lab
   unless b $
     fail ("IFC violation: " ++
            show (view cur lab) ++
-           " ⊑ " ++ name ++
+           " ⊑ " ++ show (Name name) ++
            " ⊑ " ++ show (view clearance lab))
-  Net.send s (encode a)
+  d <- label (me %) a
+  liftIO $ putStrLn "Sending: "
+  liftIO $ print (encode d)
+  Net.send s (encode d)
 
-recv :: forall m a . (MonadIO m, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => LSocket a -> m (Labeled Principal (Maybe a))
+{- I would really like to have it return m (Labeled Principal (Maybe a)),
+   but when we receive Nothing we don't know how to label it -}
+recv :: forall m a . (MonadIO m, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m) => LSocket a -> m (Maybe (Labeled Principal a))
 recv (LSocket (s, name)) =
-  Net.recv s (maxSize (undefined :: a)) >>= \case
-    Nothing -> label (name %) Nothing
-    Just x -> case decode x of
-      Nothing -> label (name %) Nothing
-      Just y -> label (name %) (Just y)
+  Net.recv s (maxSize (undefined :: Labeled Principal a)) >>= \case
+    Nothing -> return Nothing
+    Just x -> do
+      case decode x of
+        Nothing -> return Nothing
+        Just y -> return $ Just y
 
 instance MonadThrow FLAMIO where
   throwM = FLAMIO . throwM
@@ -897,11 +904,11 @@ instance Serializable Principal where
       Just (0, _) -> Just (:⊤)
       Just (1, _) -> Just (:⊥)
       Just (2, bs') -> Name <$> decode bs'
-      Just (3, bs') -> uncurry (:/\) <$> decode bs
-      Just (4, bs') -> uncurry (:\/) <$> decode bs
+      Just (3, bs') -> uncurry (:/\) <$> decode bs'
+      Just (4, bs') -> uncurry (:\/) <$> decode bs'
       Just (5, bs') -> (:→) <$> decode bs'
       Just (6, bs') -> (:←) <$> decode bs'
-      Just (7, bs') -> uncurry (:::) <$> decode bs
+      Just (7, bs') -> uncurry (:::) <$> decode bs'
       _ -> Nothing
 
   maxSize _ = 1024

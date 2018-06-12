@@ -1,8 +1,7 @@
-{-# LANGUAGE ScopedTypeVariables, LambdaCase #-}
-{-# OPTIONS_GHC -v #-}
+{-# LANGUAGE ScopedTypeVariables, LambdaCase, PostfixOperators #-}
 
 module Example.Network where
-import Lib.FLAM
+import Lib.FLAM hiding ((≽))
 import Lib.LIO
 import Control.Monad.State
 import Battleship
@@ -21,15 +20,19 @@ ship8 = [(r 9, c 4), (r 9, c 5), (r 9, c 6), (r 9, c 7), (r 9, c 8), (r 9, c 9)]
 ships :: [Ship]
 ships = [ship1, ship2, ship3, ship4, ship5, ship6, ship7, ship8]
 
+(≽) :: (ToPrincipal a, ToPrincipal b) => a -> b -> (a, b)
+p ≽ q = (p, q)
+
 example :: FLAMIO ()
 example = do
-  serve ("127.0.0.1", "8000", "Client") $ \(socket :: LSocket Msg) -> do
-    recv socket >>= \case
-      
-    evalBattleshipT (await socket) ships
+  addDelegate (("Server" →) ≽ ("Client" →)) bot
+  addDelegate (("Client" ←) ≽ ("Server" ←)) bot
+  withStrategy [bot] $ do
+    serve ("127.0.0.1", "8000", "Client") $ \(socket :: LSocket Msg) -> do
+      evalBattleshipT (await socket) ships
   return ()
 
 runExample :: IO ()
 runExample =
   evalStateT (unLIO (runFLAM example))
-  (BoundedLabel { _cur = bot, _clearance = top }, H Set.empty, [])
+  (BoundedLabel { _cur = bot, _clearance = ("Server" %) }, H Set.empty, [])
