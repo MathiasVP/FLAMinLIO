@@ -479,7 +479,7 @@ p .≽ q =
   disjR (p, q) <|||>
   conjL (p, q)
 
-(≽) :: (MonadLIO H FLAM m, HasCache (Cache Principal) m, ToPrincipal a, ToPrincipal b) => a -> b -> m Bool
+(≽) :: (MonadLIO H FLAM m, HasCache (Cache Principal) m, ToLabel a Principal, ToLabel b Principal) => a -> b -> m Bool
 p ≽ q = lowerB <$> normalize (p %) .≽. normalize (q %)
 
 instance SemiLattice Principal where
