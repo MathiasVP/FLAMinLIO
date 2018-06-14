@@ -1,4 +1,7 @@
-{-# LANGUAGE ScopedTypeVariables, GeneralizedNewtypeDeriving, LambdaCase #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE PostfixOperators #-}
+{-# LANGUAGE ScopedTypeVariables, GeneralizedNewtypeDeriving, LambdaCase, TemplateHaskell #-}
 
 module Battleship where
 import Lib.FLAM
@@ -7,6 +10,8 @@ import qualified Data.List as List
 import qualified Data.ByteString as B
 import Control.Monad.State
 import Control.Arrow
+import Control.Lens
+import Control.Lens.Traversal
 
 type Line = [Bool]
 type Grid = [Line]
@@ -28,27 +33,37 @@ r = Row
 c :: Int -> Column
 c = Column
 
-type BattleshipT = StateT ([Ship], [Hit])
+data BattleshipData = BattleShipData { _ships :: Labeled FLAM [Ship], _hits :: [Hit] }
 
-evalBattleshipT :: Monad m => BattleshipT m a -> [Ship] -> m a 
-evalBattleshipT m ships = evalStateT m (ships, [])
+makeLenses ''BattleshipData
 
-getShips :: Monad m => BattleshipT m [Ship]
-getShips = gets fst
+type BattleshipT = StateT BattleshipData
+
+evalBattleshipT :: Monad m => BattleshipT m a -> Labeled FLAM [Ship] -> m a 
+evalBattleshipT m ships = evalStateT m (BattleShipData ships [])
+
+getShips :: Monad m => BattleshipT m (Labeled FLAM [Ship])
+getShips = gets (view ships)
 
 getHits :: Monad m => BattleshipT m [Hit]
-getHits = gets snd
+getHits = gets (view hits)
 
 addHit :: Monad m => Hit -> BattleshipT m ()
-addHit = modify . second . (:)
+addHit = modify . over hits . (:)
 
-clear :: Monad m => Coordinate -> BattleshipT m ()
-clear c = modify $ first $ List.map (List.delete c)
+modifyM :: (Monad m) => (s -> m s) -> StateT s m ()
+modifyM f = get >>= (lift . f) >>= put
 
-dead :: Monad m => BattleshipT m Bool
-dead = List.all List.null <$> getShips
+clear :: (MonadLIO H Principal m, MonadFLAMIO m) => Coordinate -> BattleshipT m ()
+clear c = modifyM $ mapMOf ships $ \lab -> do
+            ships <- unlabel lab
+            clr <- getClearance
+            label clr (List.map (List.delete c) ships)
 
-alive :: Monad m => BattleshipT m Bool
+dead :: (MonadLIO H Principal m, MonadFLAMIO m) => BattleshipT m Bool
+dead = List.all List.null <$> (getShips >>= unlabel)
+
+alive :: (MonadLIO H Principal m, MonadFLAMIO m) => BattleshipT m Bool
 alive = not <$> dead
 
 onCoordinate :: Coordinate -> Ship -> Bool
@@ -57,13 +72,13 @@ onCoordinate c (c':s)
   | c == c' = True
   | otherwise = onCoordinate c s
 
-hasShip :: Monad m => Coordinate -> BattleshipT m Bool
-hasShip (x, y) = List.any (onCoordinate (x, y)) <$> getShips
+hasShip :: (MonadLIO H Principal m, MonadFLAMIO m) => Coordinate -> BattleshipT m Bool
+hasShip (x, y) = List.any (onCoordinate (x, y)) <$> (getShips >>= unlabel)
 
 isHit :: Monad m => Coordinate -> BattleshipT m Bool
 isHit c = List.any ((== c) . fst) <$> getHits
 
-renderOwn :: Monad m => BattleshipT m String
+renderOwn :: (MonadLIO H Principal m, MonadFLAMIO m) => BattleshipT m String
 renderOwn = unlines <$> mapM renderLine [0..9]
   where renderLine x = mapM renderColumn [0..9]
           where renderColumn y =
@@ -118,7 +133,8 @@ attack socket = do
   x <- liftIO (read <$> getLine)
   liftIO $ putStr "> y = "
   y <- liftIO (read <$> getLine)
-  send socket bot $ Attack (r x, c y)
+  clr <- getClearance
+  send socket clr $ Attack (r x, c y)
   done <-
     lift (recv socket) >>= \case
       Just lb -> unlabel lb >>= \case
@@ -141,21 +157,24 @@ attack socket = do
 
 await :: LSocket Msg -> BattleshipT FLAMIO ()
 await socket = do
+  clr <- getClearance
   done <-
     lift (recv socket) >>= \case
       Just lb -> do
         unlabel lb >>= \case
           Attack (x, y) -> do
             liftIO $ putStrLn $ (show x ++ ", " ++ show y) ++ " was attacked!"
+            z <- "Client" ⊑ "Server"
+            liftLIO $ liftIO $ print z
             hasShip (x, y) >>= \case
               True -> do
                 clear (x, y)
                 alive >>= \case
-                  True -> do send socket bot Hit
+                  True -> do send socket clr Hit
                              return False
-                  False -> do send socket bot YouSankMyBattleship
+                  False -> do send socket clr YouSankMyBattleship
                               return True
-              False -> do send socket bot Miss
+              False -> do send socket clr Miss
                           return False
           msg -> error $ "Unexpected message: " ++ show msg
       Nothing -> error "Error receiving message!"

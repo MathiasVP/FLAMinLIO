@@ -1,10 +1,11 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables, LambdaCase, PostfixOperators #-}
 
 module Network where
 import Lib.FLAM hiding ((≽))
 import Lib.LIO
 import Control.Monad.State
-import Battleship
+import Battleship hiding (ships)
 import qualified Data.Set as Set
 
 ship1, ship2, ship3, ship4, ship5, ship6, ship7, ship8 :: Ship
@@ -17,18 +18,18 @@ ship6 = [(r 5, c 9), (r 6, c 9), (r 7, c 9)]
 ship7 = [(r 8, c 0), (r 8, c 1)]
 ship8 = [(r 9, c 4), (r 9, c 5), (r 9, c 6), (r 9, c 7), (r 9, c 8), (r 9, c 9)]
 
-(≽) :: (ToPrincipal a, ToPrincipal b) => a -> b -> (a, b)
+(≽) :: (ToLabel a Principal, ToLabel b Principal) => a -> b -> (a, b)
 p ≽ q = (p, q)
 
-ships :: [Ship]
-ships = [ship1, ship2, ship3, ship4, ship5, ship6, ship7, ship8]
+ships :: FLAMIO (Labeled Principal [Ship])
+ships = label ("Client" %) [ship1, ship2, ship3, ship4, ship5, ship6, ship7, ship8]
 example :: FLAMIO ()
 example = do
   addDelegate (("Client" →) ≽ ("Server" →)) bot
   addDelegate (("Server" ←) ≽ ("Client" ←)) bot
-  withStrategy [bot] $ do
+  withStrategy ["Client"] $ do
     connect ("127.0.0.1", "8000", "Server") $ \(socket :: LSocket Msg) -> do
-      evalBattleshipT (attack socket) ships
+      ships >>= evalBattleshipT (attack socket)
     return ()
 
 runExample :: IO ()

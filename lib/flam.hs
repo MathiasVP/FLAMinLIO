@@ -682,47 +682,41 @@ normOwnsLL p T = p :.: T
 normOwnsLL p B = B
 normOwnsLL p (q1 :.: q2) = p :.: (q1 :.: q2)
 
-class ToPrincipal c where
-  (%) :: c -> Principal
-
-instance ToPrincipal JNF where
+instance ToLabel JNF Principal where
   (%) x = ((confidentiality x) →) :/\ ((integrity x) ←)
 
-instance ToPrincipal Principal where
-  (%) = id
-
-instance ToPrincipal [Char] where
+instance ToLabel [Char] Principal where
   (%) = Name
 
-instance ToPrincipal J where
+instance ToLabel J Principal where
   (%) (J (listview -> [m])) = (%) m
   (%) (J (setview -> Just (m, ms))) = (%) m :/\ (%) (J ms)
 
-instance ToPrincipal M where
+instance ToLabel M Principal where
   (%) (M (listview -> [l])) = (%) l
   (%) (M (setview -> Just (l, ls))) = (%) l :\/ (%) (M ls)
 
-instance ToPrincipal L where
+instance ToLabel L Principal where
   (%) (N s) = (%) s
   (%) T = (:⊤)
   (%) B = (:⊥)
   (%) (p :.: q) = (%) p ::: (%) q
 
-(/\) :: (ToPrincipal a, ToPrincipal b) => a -> b -> Principal
+(/\) :: (ToLabel a Principal, ToLabel b Principal) => a -> b -> Principal
 a /\ b = (a %) :/\ (b %)
 infixr 7 /\
 
-(\/) :: (ToPrincipal a, ToPrincipal b) => a -> b -> Principal
+(\/) :: (ToLabel a Principal, ToLabel b Principal) => a -> b -> Principal
 a \/ b = (a %) :\/ (b %)
 infixr 7 \/
 
-(→) :: (ToPrincipal a) => a -> Principal
+(→) :: (ToLabel a Principal) => a -> Principal
 (→) a = (:→) (a %)
 
-(←) :: (ToPrincipal a) => a -> Principal
+(←) :: (ToLabel a Principal) => a -> Principal
 (←) a = (:←) (a %)
 
-(.:) :: (ToPrincipal a, ToPrincipal b) => a -> b -> Principal
+(.:) :: (ToLabel a Principal, ToLabel b Principal) => a -> b -> Principal
 a .: b = (a %) ::: (b %)
 
 type FLAM = Principal
@@ -739,7 +733,7 @@ newtype FLAMIO a = FLAMIO { unFLAMIO :: StateT (Cache Principal) (LIO H FLAM) a 
 instance MonadLIO H FLAM FLAMIO where
   liftLIO = FLAMIO . liftLIO
   
-addDelegate :: (MonadLIO H FLAM m, HasCache (Cache Principal) m, ToPrincipal a, ToPrincipal b, ToPrincipal c) =>
+addDelegate :: (MonadLIO H FLAM m, HasCache (Cache Principal) m, ToLabel a Principal, ToLabel b Principal, ToLabel c Principal) =>
                (a, b) -> c -> m ()
 addDelegate (p, q) l = do
   h <- liftLIO getState
@@ -747,7 +741,7 @@ addDelegate (p, q) l = do
   modifyCache $ prunedCache .~ Map.empty
   liftLIO $ setState (H $ Set.insert lab (unH h))
 
-removeDelegate :: (MonadLIO H FLAM m, HasCache (Cache Principal) m, ToPrincipal a, ToPrincipal b, ToPrincipal c) =>
+removeDelegate :: (MonadLIO H FLAM m, HasCache (Cache Principal) m, ToLabel a Principal, ToLabel b Principal, ToLabel c Principal) =>
                   (a, b) -> c -> m ()
 removeDelegate (p, q) l = do
   h <- liftLIO getState
@@ -755,7 +749,7 @@ removeDelegate (p, q) l = do
   modifyCache $ prunedCache .~ Map.empty
   liftLIO $ setState (H $ Set.delete lab (unH h))
 
-withStrategy :: (MonadLIO H FLAM m, HasCache (Cache Principal) m, ToPrincipal b) => Strategy b -> m a -> m a
+withStrategy :: (MonadLIO H FLAM m, HasCache (Cache Principal) m, ToLabel b Principal) => Strategy b -> m a -> m a
 withStrategy newStrat m = do
   modifyCache $ prunedCache .~ Map.empty
   oldStrat <- liftLIO $ gets $ view _3
@@ -805,7 +799,7 @@ connect (ip, port, name) f = do
   label (name %) x
 
 {- Is it really bad to send to a principal above your clearance? If we did not have this, the battleship example could avoid adding the delegations -}
-send :: (MonadIO m, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m, ToPrincipal c) => LSocket a -> c -> a -> m ()
+send :: (MonadIO m, MonadMask m, MonadLIO H FLAM m, HasCache (Cache Principal) m, ToLabel c Principal) => LSocket a -> c -> a -> m ()
 send (LSocket (s, name)) me a = do
   lab <- liftLIO $ gets $ view _1
   b <- (name %) ∈ lab
@@ -815,8 +809,6 @@ send (LSocket (s, name)) me a = do
            " ⊑ " ++ show (Name name) ++
            " ⊑ " ++ show (view clearance lab))
   d <- label (me %) a
-  liftIO $ putStrLn "Sending: "
-  liftIO $ print (encode d)
   Net.send s (encode d)
 
 {- I would really like to have it return m (Labeled Principal (Maybe a)),

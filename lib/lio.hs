@@ -51,9 +51,15 @@ class Monad m => HasCache c m | m -> c where
     c <- getCache
     return $ f c
 
+class ToLabel a l where
+  (%) :: a -> l
+
+instance ToLabel l l where
+  (%) = id
+  
 class (Show l, SemiLattice l) => Label s l where
   type St l
-  (⊑) :: (MonadLIO s l m, HasCache (St l) m) => l -> l -> m Bool
+  (⊑) :: (MonadLIO s l m, HasCache (St l) m, ToLabel a l, ToLabel b l) => a -> b -> m Bool
 
 instance Label s l => Functor (LIO s l) where
   fmap f (LIO x) = LIO (fmap f x)
