@@ -126,15 +126,14 @@ instance Serializable Msg where
 
   maxSize _ = 1 + maxSize (undefined :: Coordinate)
 
-attack :: LSocket Msg -> BattleshipT FLAMIO ()
-attack socket = do
+attack :: ToLabel a Principal => a -> LSocket Msg -> BattleshipT FLAMIO ()
+attack p socket = do
   renderTheirs >>= liftIO . putStrLn
   liftIO $ putStr "> x = "
   x <- liftIO (read <$> getLine)
   liftIO $ putStr "> y = "
   y <- liftIO (read <$> getLine)
-  clr <- getClearance
-  send socket clr $ Attack (r x, c y)
+  send socket p $ Attack (r x, c y)
   done <-
     lift (recv socket) >>= \case
       Just lb -> unlabel lb >>= \case
@@ -153,30 +152,27 @@ attack socket = do
         msg -> error $ "Unexpected message: " ++ show msg
       Nothing -> error "Error receiving message!"
   renderTheirs >>= liftIO . putStrLn
-  unless done $ await socket
+  unless done $ await p socket
 
-await :: LSocket Msg -> BattleshipT FLAMIO ()
-await socket = do
-  clr <- getClearance
+await :: ToLabel a Principal => a -> LSocket Msg -> BattleshipT FLAMIO ()
+await p socket = do
   done <-
     lift (recv socket) >>= \case
       Just lb -> do
         unlabel lb >>= \case
           Attack (x, y) -> do
             liftIO $ putStrLn $ (show x ++ ", " ++ show y) ++ " was attacked!"
-            z <- "Client" ⊑ "Server"
-            liftLIO $ liftIO $ print z
             hasShip (x, y) >>= \case
               True -> do
                 clear (x, y)
                 alive >>= \case
-                  True -> do send socket clr Hit
+                  True -> do send socket p Hit
                              return False
-                  False -> do send socket clr YouSankMyBattleship
+                  False -> do send socket p YouSankMyBattleship
                               return True
-              False -> do send socket clr Miss
+              False -> do send socket p Miss
                           return False
           msg -> error $ "Unexpected message: " ++ show msg
       Nothing -> error "Error receiving message!"
   renderOwn >>= liftIO . putStrLn
-  unless done $ attack socket
+  unless done $ attack p socket

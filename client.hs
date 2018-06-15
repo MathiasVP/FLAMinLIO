@@ -29,7 +29,7 @@ example = do
   addDelegate (("Server" ←) ≽ ("Client" ←)) bot
   withStrategy ["Client"] $ do
     connect ("127.0.0.1", "8000", "Server") $ \(socket :: LSocket Msg) -> do
-      ships >>= evalBattleshipT (attack socket)
+      ships >>= evalBattleshipT (attack "Client" socket)
     return ()
 
 runExample :: IO ()

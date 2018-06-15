@@ -21,26 +21,18 @@ import Lib.LIO
 import Lib.TCB()
 import qualified Data.List as List
 import qualified Data.Map.Strict as Map
-import Data.Map(Map)
-import qualified Data.POMap.Strict as POMap
-import Data.POMap.Strict(POMap)
+import Data.Map.Strict(Map)
 import qualified Data.Set as Set
 import Data.Set(Set, (\\))
 import Data.Either
-import Data.String
 import Control.Monad.State
-import Control.Applicative
-import qualified Data.Maybe as Maybe
-import Control.Monad.Reader
-import Control.Monad.Trans.Maybe
 import Control.Arrow
 import Control.Lens.Tuple
 import Control.Lens
-import Algebra.PartialOrd
 import Control.Monad.Extra
 
+{- For networking -}
 import Control.Monad.Catch
-
 import qualified Data.Binary as Bin
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
@@ -116,8 +108,7 @@ newtype Replacement t = Replacement t
 newtype Pattern t = Pattern t
 
 -- substitute oldpc newpc pc means pc[oldpc -> newpc]
-substitute :: Eq l => Pattern (ProgressCondition l) -> Replacement (ProgressCondition l) ->
-              Original (ProgressCondition l) -> ProgressCondition l
+substitute :: Eq l => Pattern (ProgressCondition l) -> Replacement (ProgressCondition l) -> Original (ProgressCondition l) -> ProgressCondition l
 substitute (Pattern oldpc) (Replacement newpc) (Original pc) | oldpc == pc = newpc
 substitute oldpc newpc (Original (Conj pc1 pc2)) =
   Conj (substitute oldpc newpc (Original pc1)) (substitute oldpc newpc (Original pc2))
@@ -147,14 +138,6 @@ setFilterMapM f s = visit s Set.empty
           f a >>= \case
             Nothing -> visit as s
             Just b -> visit as (Set.insert b s)
-
-mapFilterM :: (Ord k, Monad m) => (a -> m Bool) -> Map k a -> m (Map k a)
-mapFilterM p m = visit m Map.empty
-  where visit (mapview -> Nothing) m = return m
-        visit (mapview -> Just ((k, a), m')) m =
-          p a >>= \case
-            False -> visit m' m
-            True -> visit m' (Map.insert k a m)
 
 (<&&&>) :: (Monad m) => m (QueryResult l) -> m (QueryResult l) -> m (QueryResult l)
 (<&&&>) m1 m2 =
@@ -209,7 +192,7 @@ mapMaybeKeepM f (mapview -> Just ((k, a), m)) = do
   f a >>= \case
     Just b -> return (m1, Map.insert k b m2)
     Nothing -> return (Map.insert k a m1, m2)
-  
+
 update :: forall m . (MonadLIO H FLAM m, HasCache (Cache Principal) m) => (Principal, Principal) -> (Principal, Principal) -> QueryResult Principal -> m ()
 update (cur, clr) (p, q) Success = do
   cur' <- liftLIO getLabel
@@ -306,8 +289,7 @@ searchPrunedCache (cur, clr) (p, q) = do
         Nothing -> return Nothing
     Nothing -> return Nothing
     
-searchcache :: (MonadLIO H FLAM m, HasCache (Cache Principal) m) => (Principal, Principal) -> (Principal, Principal) ->
-               m (Maybe (CacheSearchResult Principal))
+searchcache :: (MonadLIO H FLAM m, HasCache (Cache Principal) m) => (Principal, Principal) -> (Principal, Principal) -> m (Maybe (CacheSearchResult Principal))
 searchcache (cur, clr) (p, q) = do
   let failedSearch = searchFailedCache (cur, clr) (p, q)
       prunedSearch = searchPrunedCache (cur, clr) (p, q)
@@ -482,16 +464,16 @@ p .≽ q =
 (≽) :: (MonadLIO H FLAM m, HasCache (Cache Principal) m, ToLabel a Principal, ToLabel b Principal) => a -> b -> m Bool
 p ≽ q = lowerB <$> normalize (p %) .≽. normalize (q %)
 
+(.⊑.) :: (MonadLIO H FLAM m, HasCache (Cache Principal) m) => Principal -> Principal -> m (QueryResult Principal)
+p .⊑. q = ((q →) /\ (p ←)) .≽. ((p →) /\ (q ←))
+
 instance SemiLattice Principal where
   p ⊔ q = normalize (((p /\ q) →) /\ ((p \/ q) ←))
   p ⊓ q = normalize (((p \/ q) →) /\ ((p /\ q) ←))
-  
+
 instance Label H Principal where
   type St Principal = Cache Principal
   p ⊑ q = ((q →) /\ (p ←)) ≽ ((p →) /\ (q ←))
-
-instance MonadLIO s l m => MonadLIO s l (ReaderT r m) where
-  liftLIO = lift . liftLIO
   
 mSingleton :: L -> M
 mSingleton = M . Set.singleton
@@ -804,7 +786,7 @@ send (LSocket (s, name)) me a = do
   lab <- liftLIO $ gets $ view _1
   b <- (name %) ∈ lab
   unless b $
-    fail ("IFC violation: " ++
+    fail ("IFC violation (send): " ++
            show (view cur lab) ++
            " ⊑ " ++ show (Name name) ++
            " ⊑ " ++ show (view clearance lab))

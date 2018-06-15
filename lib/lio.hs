@@ -172,7 +172,7 @@ newRef l x = do
   b <- l ∈ lab
   liftLIO . LIO . StateT $ \(lab, s, strat) -> do
   unless b $
-    fail ("IFC violation: " ++
+    fail ("IFC violation (new): " ++
            show (view cur lab) ++
            " ⊑ " ++ show l ++
            " ⊑ " ++ show (view clearance lab))
@@ -194,7 +194,7 @@ writeRef (LIORef lref) x = do
   lab <- liftLIO $ gets $ view _1
   b <- labelOf lref ∈ lab
   unless b $
-    fail ("IFC violation: " ++
+    fail ("IFC violation (write): " ++
            show (view cur lab) ++
            " ⊑ " ++ show (labelOf lref) ++
            " ⊑ " ++ show (view clearance lab))

@@ -25,22 +25,16 @@ ships = label ("Server" %) [ship1, ship2, ship3, ship4, ship5, ship6, ship7, shi
 (≽) :: (ToLabel a Principal, ToLabel b Principal) => a -> b -> (a, b)
 p ≽ q = (p, q)
 
-{- This is an example of an unfortunate circularity where we need to prove l1 actsfor l2 and
-   l2 = clr and l1 = ldel join cur, where ldel is a label on a delegation we need to use.
-   How can we resolve this? -}
 example :: FLAMIO ()
 example = do
   addDelegate (("Server" →) ≽ ("Client" →)) bot
   addDelegate (("Client" ←) ≽ ("Server" ←)) bot
-  liftLIO $ modify $ (_1 . cur) .~ ("Client" %)
   withStrategy [bot] $ do
-    x <- "Client" ⊑ "Server"
-    liftIO $ print x
-    {-serve ("127.0.0.1", "8000", "Client") $ \(socket :: LSocket Msg) -> do
-      ships >>= evalBattleshipT (await socket)-}
+    serve ("127.0.0.1", "8000", "Client") $ \(socket :: LSocket Msg) -> do
+      ships >>= evalBattleshipT (await "Server" socket)
   return ()
 
 runExample :: IO ()
 runExample =
   evalStateT (unLIO (runFLAM example))
-  (BoundedLabel { _cur = bot, _clearance = ("Server" %) }, H Set.empty, [])
+  (BoundedLabel { _cur = bot, _clearance = top }, H Set.empty, [])
