@@ -126,32 +126,32 @@ instance Serializable Msg where
 
   maxSize _ = 1 + maxSize (undefined :: Coordinate)
 
-attack :: ToLabel a Principal => a -> LSocket Msg -> BattleshipT FLAMIO ()
+attack :: (ToLabel a Principal) => a -> LSocket Msg -> BattleshipT FLAMIO ()
 attack p socket = do
-  renderTheirs >>= liftIO . putStrLn
-  liftIO $ putStr "> x = "
-  x <- liftIO (read <$> getLine)
-  liftIO $ putStr "> y = "
-  y <- liftIO (read <$> getLine)
+  renderTheirs >>= liftLIO . liftIO . putStrLn
+  liftLIO $ liftIO $ putStr "> x = "
+  x <- liftLIO $ liftIO (read <$> getLine)
+  liftLIO $ liftIO $ putStr "> y = "
+  y <- liftLIO $ liftIO (read <$> getLine)
   send socket p $ Attack (r x, c y)
   done <-
     lift (recv socket) >>= \case
       Just lb -> unlabel lb >>= \case
         Hit -> do
-          liftIO $ putStrLn "Hit!"
+          liftLIO $ liftIO $ putStrLn "Hit!"
           addHit ((r x, c y), True)
           return False
         Miss -> do
-          liftIO $ putStrLn "Miss!"
+          liftLIO $ liftIO $ putStrLn "Miss!"
           addHit ((r x, c y), False)
           return False
         YouSankMyBattleship -> do
-          liftIO $ putStrLn "You sank my battleship!"
+          liftLIO $ liftIO $ putStrLn "You sank my battleship!"
           addHit ((r x, c y), True)
           return True
         msg -> error $ "Unexpected message: " ++ show msg
       Nothing -> error "Error receiving message!"
-  renderTheirs >>= liftIO . putStrLn
+  renderTheirs >>= liftLIO . liftIO . putStrLn
   unless done $ await p socket
 
 await :: ToLabel a Principal => a -> LSocket Msg -> BattleshipT FLAMIO ()
@@ -161,7 +161,7 @@ await p socket = do
       Just lb -> do
         unlabel lb >>= \case
           Attack (x, y) -> do
-            liftIO $ putStrLn $ (show x ++ ", " ++ show y) ++ " was attacked!"
+            liftLIO $ liftIO $ putStrLn $ (show x ++ ", " ++ show y) ++ " was attacked!"
             hasShip (x, y) >>= \case
               True -> do
                 clear (x, y)
@@ -174,5 +174,5 @@ await p socket = do
                           return False
           msg -> error $ "Unexpected message: " ++ show msg
       Nothing -> error "Error receiving message!"
-  renderOwn >>= liftIO . putStrLn
+  renderOwn >>= liftLIO . liftIO . putStrLn
   unless done $ attack p socket

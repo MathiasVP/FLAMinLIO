@@ -2,10 +2,10 @@
 {-# LANGUAGE ScopedTypeVariables, LambdaCase, PostfixOperators #-}
 
 module Example.Network where
-import Lib.FLAM hiding ((≽))
+import Lib.FLAM
 import Lib.LIO
 import Control.Monad.State
-import Control.Lens
+import Control.Lens hiding ((:<))
 import Battleship hiding (ships)
 import qualified Data.Set as Set
 
@@ -22,13 +22,10 @@ ship8 = [(r 9, c 4), (r 9, c 5), (r 9, c 6), (r 9, c 7), (r 9, c 8), (r 9, c 9)]
 ships :: FLAMIO (Labeled Principal [Ship])
 ships = label ("Server" %) [ship1, ship2, ship3, ship4, ship5, ship6, ship7, ship8]
 
-(≽) :: (ToLabel a Principal, ToLabel b Principal) => a -> b -> (a, b)
-p ≽ q = (p, q)
-
 example :: FLAMIO ()
 example = do
-  addDelegate (("Server" →) ≽ ("Client" →)) bot
-  addDelegate (("Client" ←) ≽ ("Server" ←)) bot
+  addDelegate (("Server" →), ("Client" →)) bot
+  addDelegate (("Client" ←), ("Server" ←)) bot
   withStrategy [bot] $ do
     serve ("127.0.0.1", "8000", "Client") $ \(socket :: LSocket Msg) -> do
       ships >>= evalBattleshipT (await "Server" socket)
@@ -37,4 +34,4 @@ example = do
 runExample :: IO ()
 runExample =
   evalStateT (unLIO (runFLAM example))
-  (BoundedLabel { _cur = bot, _clearance = top }, H Set.empty, [])
+  (BoundedLabel { _cur = bot, _clearance = ("Server" %) }, H Set.empty, [])

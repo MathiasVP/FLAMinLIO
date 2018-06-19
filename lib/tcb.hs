@@ -1,5 +1,5 @@
-{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE FlexibleInstances #-}
 module Lib.TCB where
 
 import Lib.LIO
