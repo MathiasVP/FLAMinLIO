@@ -55,22 +55,22 @@ mapview = Map.minViewWithKey
 data Principal
   = (:⊤)
   | (:⊥)
-  | Name String
-  | Principal :/\ Principal
-  | Principal :\/ Principal
-  | (:→) Principal
-  | (:←) Principal
-  | Principal ::: Principal
+  | Name !String
+  | !Principal :/\ !Principal
+  | !Principal :\/ !Principal
+  | (:→) !Principal
+  | (:←) !Principal
+  | !Principal ::: !Principal
   deriving (Eq, Ord, Show)
 
 newtype H = H { unH :: Set (Labeled Principal (Principal, Principal)) }
   deriving (Ord, Eq, Show)
 
 data L
-  = N String
+  = N !String
   | T
   | B
-  | L :.: L
+  | !L :.: !L
   deriving (Eq, Ord, Show)
 
 newtype M = M { unM :: Set L } -- L₁ \/ L₂ \/ ... \/ Lₙ
@@ -79,33 +79,33 @@ newtype M = M { unM :: Set L } -- L₁ \/ L₂ \/ ... \/ Lₙ
 newtype J = J { unJ :: Set M } -- M₁ /\ M₂ /\ ... /\ Mₙ
   deriving (Eq, Ord, Show)
 
-data JNF = JNF { confidentiality :: J, integrity :: J }
+data JNF = JNF { confidentiality :: !J, integrity :: !J }
   deriving (Show, Eq, Ord)
 
 data ProgressCondition l
-  = ActsFor Int l l
-  | Conj (ProgressCondition l) (ProgressCondition l)
-  | Disj (ProgressCondition l) (ProgressCondition l)
+  = ActsFor !Int !l !l
+  | Conj !(ProgressCondition l) !(ProgressCondition l)
+  | Disj !(ProgressCondition l) !(ProgressCondition l)
   | TrueCondition
   | FalseCondition
   deriving (Show, Eq)
 
-type Assumption = (Int, (Principal, Principal))
-newtype StepIndexT m a = StepIndexT { unStepIndexT :: ReaderT (Int, [Assumption]) m a }
-  deriving (Functor, Applicative, Monad, MonadReader (Int, [Assumption]))
+type Assumptions = Map Int (Principal, Principal)
+newtype StepIndexT m a = StepIndexT { unStepIndexT :: ReaderT (Int, Assumptions) m a }
+  deriving (Functor, Applicative, Monad, MonadReader (Int, Assumptions))
 
 instance MonadState s m => MonadState s (StepIndexT m) where
   get = StepIndexT get
   put = StepIndexT . put
 
 type ReachabilityCache l = Map (Set (l, l)) ((Set (J, J), Set (J, J)))
-type ProvedCache l = Map (l, l, H, Strategy l, [Assumption]) (Map (Int, (l, l)) l)
-type PrunedCache l = Map (l, l, [Assumption]) (Map (Int, (l, l)) (ProgressCondition l))
-type FailedCache l = Map (l, l, H, Strategy l, [Assumption]) (Map (Int, (l, l)) l)
-data Cache l = Cache { _reachabilityCache :: ReachabilityCache l,
-                     _provedCache :: ProvedCache l,
-                     _prunedCache :: PrunedCache l,
-                     _failedCache :: FailedCache l }
+type ProvedCache l = Map (l, l, H, Strategy l, Assumptions) (Map (Int, (l, l)) l)
+type PrunedCache l = Map (l, l, Assumptions) (Map (Int, (l, l)) (ProgressCondition l))
+type FailedCache l = Map (l, l, H, Strategy l, Assumptions) (Map (Int, (l, l)) l)
+data Cache l = Cache { _reachabilityCache :: !(ReachabilityCache l),
+                     _provedCache :: !(ProvedCache l),
+                     _prunedCache :: !(PrunedCache l),
+                     _failedCache :: !(FailedCache l) }
 
 makeLenses ''Cache
 
@@ -139,7 +139,7 @@ substitute _ _ (Original progCond) = progCond
 data QueryResult l
   = Failed
   | Success
-  | Pruned (ProgressCondition l)
+  | Pruned !(ProgressCondition l)
   deriving Show
 
 liftB :: Bool -> QueryResult l
@@ -191,8 +191,9 @@ mapMapMaybeM f m = do
 
 isSatisfied :: MonadFLAMIO m => ProgressCondition Principal -> m Bool
 isSatisfied (ActsFor idx p q) = do
-  (idx, assumptions) <- liftFLAMIO $ FLAMIO $ ask
-  return $ List.any (\(idx', (p', q')) -> (p, q) == (p', q') && idx' <= idx) assumptions  
+  (_, assumptions) <- liftFLAMIO $ FLAMIO $ ask
+  let assumptions' = Map.takeWhileAntitone (<= idx) assumptions
+  reach (p, q) (Set.fromAscList . Map.elems $ assumptions')
 isSatisfied (Conj pc1 pc2) =
   isSatisfied pc1 >>= \case
     True -> isSatisfied pc2
@@ -298,9 +299,9 @@ searchProvedCache (cur, clr) (p, q) = do
     Nothing -> return Nothing
 
 data CacheSearchResult l
-  = ProvedResult l
-  | FailedResult l
-  | PrunedResult (ProgressCondition l)
+  = ProvedResult !l
+  | FailedResult !l
+  | PrunedResult !(ProgressCondition l)
 
 searchPrunedCache :: MonadFLAMIO m => (Principal, Principal) -> (Principal, Principal) -> m (Maybe (ProgressCondition Principal))
 searchPrunedCache (cur, clr) (p, q) = do
@@ -348,7 +349,7 @@ p .≽. q = do
     Just (PrunedResult pc) -> return $ Pruned pc
     Nothing -> do
       update (curLab, clrLab) idx (p, q) (Pruned (ActsFor idx p q))
-      r <- liftFLAMIO $ FLAMIO $ local (second $ ((idx + 1, (normalize p, normalize q)) :)) (unFLAMIO (p .≽ q))
+      r <- liftFLAMIO $ FLAMIO $ local (second $ Map.insert (idx + 1) (normalize p, normalize q)) (unFLAMIO (p .≽ q))
       update (curLab, clrLab) idx (p, q) r
       return r
 
@@ -501,8 +502,8 @@ del (p, q) = do
 löb :: MonadFLAMIO m => (Principal, Principal) -> m (QueryResult Principal)
 löb (p, q) = do
   (idx, assumptions) <- liftFLAMIO $ FLAMIO ask
-  return $ liftB $ List.any (\(idx', (p', q')) -> (p, q) == (p', q') && idx' <= idx) assumptions
-   
+  let assumptions' = Map.takeWhileAntitone (<= idx) assumptions
+  liftB <$> reach (p, q) (Set.fromAscList . Map.elems $ assumptions')
 
 distrL :: MonadFLAMIO m => (Principal, Principal) -> m (QueryResult Principal)
 distrL ((:→) (p1 :/\ p2), q) = ((p1 →) /\ (p2 →)) .≽. q
@@ -538,7 +539,7 @@ p .≽ q =
 
 (≽) :: (MonadFLAMIO m, ToLabel a Principal, ToLabel b Principal) => a -> b -> m Bool
 p ≽ q =
-  runReaderT (unStepIndexT ((normalize (p %) .≽. normalize (q %)) >>= lowerB)) (0, [])
+  runReaderT (unStepIndexT ((normalize (p %) .≽. normalize (q %)) >>= lowerB)) (0, Map.empty)
 
 instance SemiLattice Principal where
   p ⊔ q = normalize (((p /\ q) →) /\ ((p \/ q) ←))
@@ -639,8 +640,8 @@ mkNonEmpty s      = s
 mergeWith :: (a -> a -> Either a a) -> [a] -> [a]
 mergeWith _ []      = []
 mergeWith op (f:fs) = case partitionEithers $ map (`op` f) fs of
-                        ([],_)              -> f : mergeWith op fs
-                        (updated,untouched) -> mergeWith op (updated ++ untouched)
+                        ([], _)              -> f : mergeWith op fs
+                        (updated, untouched) -> mergeWith op (updated ++ untouched)
 
 jSimplify :: J -> J
 jSimplify = repeatF go
@@ -842,6 +843,9 @@ type IP = String
 type Name = String
 type Port = String
 type Host = (IP, Port, Name)
+
+channelLabel :: LSocket a -> String
+channelLabel (LSocket (_, s)) = s
   
 serve :: (MonadIO m, Serializable a, MonadMask m, MonadFLAMIO m) => Host -> (LSocket a -> m r) -> m (Labeled Principal r)
 serve (ip, port, name) f = do
@@ -854,7 +858,10 @@ connect (ip, port, name) f = do
   x <- Net.connect ip port (\(socket, _) -> f (LSocket (socket, name)))
   label (name %) x
 
-{- Is it really bad to send to a principal above your clearance? If we did not have this, the battleship example could avoid adding the delegations -}
+{- Q: Is it really bad to send to a principal above your clearance?
+      If we did not have this, the battleship example could avoid adding the delegations
+   A: If we don't do this we cannot get a theorem equivalent to the LIO's Theorem 3 (Containment imposed by clearance)
+-}
 send :: (MonadIO m, MonadMask m, MonadFLAMIO m, ToLabel c Principal) => LSocket a -> c -> a -> m ()
 send (LSocket (s, name)) me a = do
   lab <- liftLIO $ gets $ view _1
@@ -984,7 +991,7 @@ instance Serializable a => Serializable (Labeled FLAM a) where
   maxSize _ = maxSize (undefined :: FLAM, undefined :: a)
 
 runFLAM :: FLAMIO a -> LIO H FLAM a
-runFLAM m = evalStateT (runReaderT (unStepIndexT $ unFLAMIO m) (0, [])) emptyCache
+runFLAM m = evalStateT (runReaderT (unStepIndexT $ unFLAMIO m) (0, Map.empty)) emptyCache
 
 instance MonadFLAMIO FLAMIO where
   liftFLAMIO = id

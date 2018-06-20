@@ -120,11 +120,13 @@ example = execBank $ do
     asUser "Matt" $ do
       Map.lookup "Charlie" <$> get >>= \case
         Just amount -> do
+          {-x <- ("Matt" →) ≽ ("Charlie" →)
+          liftLIO $ liftIO $ print x-}
           a <- unlabel amount
           {- ... -}
           return ()
         Nothing -> return ()
-
+  
   -- Chloe is allowed to wire money from her own account to Charlotte
   asUser "Chloe" $ do
     transfer "Chloe" "Charlotte" 10
@@ -146,7 +148,6 @@ example = execBank $ do
   {-strategy [] $ do
     asUser "Charlie" $ do
       transfer "Charlotte" "Charlie" 30-}
-
 runExample :: IO Bank
 runExample =
   evalStateT (unLIO (runFLAM example))

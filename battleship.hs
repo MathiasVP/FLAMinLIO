@@ -133,7 +133,16 @@ attack p socket = do
   x <- liftLIO $ liftIO (read <$> getLine)
   liftLIO $ liftIO $ putStr "> y = "
   y <- liftLIO $ liftIO (read <$> getLine)
-  send socket p $ Attack (r x, c y)
+  newScope $ do
+    clr <- getClearance
+    cur <- getLabel
+    addDelegate ((p →), (cur →)) cur
+    addDelegate ((cur ←), (p ←)) cur
+    addDelegate ((clr →), (channelLabel socket →)) cur
+    addDelegate ((channelLabel socket ←), (clr ←)) cur
+    addDelegate ((channelLabel socket →), (cur →)) cur
+    addDelegate ((cur ←), (channelLabel socket ←)) cur
+    send socket p (Attack (r x, c y))
   done <-
     lift (recv socket) >>= \case
       Just lb -> unlabel lb >>= \case
@@ -164,14 +173,48 @@ await p socket = do
             liftLIO $ liftIO $ putStrLn $ (show x ++ ", " ++ show y) ++ " was attacked!"
             hasShip (x, y) >>= \case
               True -> do
+                liftLIO $ liftIO $ putStrLn $ "hasShip " ++ show (x, y) ++ " is True!"
                 clear (x, y)
                 alive >>= \case
-                  True -> do send socket p Hit
-                             return False
-                  False -> do send socket p YouSankMyBattleship
-                              return True
-              False -> do send socket p Miss
-                          return False
+                  True -> do
+                    liftLIO $ liftIO $ putStrLn $ "alive is True!"
+                    newScope $ do
+                      clr <- getClearance
+                      cur <- getLabel
+                      addDelegate ((p →), (cur →)) cur
+                      addDelegate ((cur ←), (p ←)) cur
+                      addDelegate ((clr →), (channelLabel socket →)) cur
+                      addDelegate ((channelLabel socket ←), (clr ←)) cur
+                      addDelegate ((channelLabel socket →), (cur →)) cur
+                      addDelegate ((cur ←), (channelLabel socket ←)) cur
+                      send socket p Hit
+                    return False
+                  False -> do
+                    liftLIO $ liftIO $ putStrLn $ "alive is False!"
+                    newScope $ do
+                      clr <- getClearance
+                      cur <- getLabel
+                      addDelegate ((p →), (cur →)) cur
+                      addDelegate ((cur ←), (p ←)) cur
+                      addDelegate ((clr →), (channelLabel socket →)) cur
+                      addDelegate ((channelLabel socket ←), (clr ←)) cur
+                      addDelegate ((channelLabel socket →), (cur →)) cur
+                      addDelegate ((cur ←), (channelLabel socket ←)) cur
+                      send socket p YouSankMyBattleship
+                    return True
+              False -> do
+                liftLIO $ liftIO $ putStrLn $ "hasShip " ++ show (x, y) ++ " is False!"
+                newScope $ do
+                  clr <- getClearance
+                  cur <- getLabel
+                  addDelegate ((p →), (cur →)) cur
+                  addDelegate ((cur ←), (p ←)) cur
+                  addDelegate ((clr →), (channelLabel socket →)) cur
+                  addDelegate ((channelLabel socket ←), (clr ←)) cur
+                  addDelegate ((channelLabel socket →), (cur →)) cur
+                  addDelegate ((cur ←), (channelLabel socket ←)) cur
+                  send socket p Miss
+                return False
           msg -> error $ "Unexpected message: " ++ show msg
       Nothing -> error "Error receiving message!"
   renderOwn >>= liftLIO . liftIO . putStrLn

@@ -24,11 +24,11 @@ ships = label ("Server" %) [ship1, ship2, ship3, ship4, ship5, ship6, ship7, shi
 
 example :: FLAMIO ()
 example = do
-  addDelegate (("Server" →), ("Client" →)) bot
-  addDelegate (("Client" ←), ("Server" ←)) bot
+  addDelegate (("Client" →), ("Server" →)) bot
+  addDelegate (("Server" ←), ("Client" ←)) bot
   withStrategy [bot] $ do
-    serve ("127.0.0.1", "8000", "Client") $ \(socket :: LSocket Msg) -> do
-      ships >>= evalBattleshipT (await "Server" socket)
+    serve ("127.0.0.1", "8000", "Client") $ \socket -> do
+      ships >>= evalBattleshipT (await bot socket)
   return ()
 
 runExample :: IO ()

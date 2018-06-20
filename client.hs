@@ -2,7 +2,7 @@
 {-# LANGUAGE ScopedTypeVariables, LambdaCase, PostfixOperators #-}
 
 module Network where
-import Lib.FLAM hiding ((≽))
+import Lib.FLAM
 import Lib.LIO
 import Control.Monad.State
 import Battleship hiding (ships)
@@ -18,18 +18,16 @@ ship6 = [(r 5, c 9), (r 6, c 9), (r 7, c 9)]
 ship7 = [(r 8, c 0), (r 8, c 1)]
 ship8 = [(r 9, c 4), (r 9, c 5), (r 9, c 6), (r 9, c 7), (r 9, c 8), (r 9, c 9)]
 
-(≽) :: (ToLabel a Principal, ToLabel b Principal) => a -> b -> (a, b)
-p ≽ q = (p, q)
-
 ships :: FLAMIO (Labeled Principal [Ship])
 ships = label ("Client" %) [ship1, ship2, ship3, ship4, ship5, ship6, ship7, ship8]
+
 example :: FLAMIO ()
 example = do
-  addDelegate (("Client" →) ≽ ("Server" →)) bot
-  addDelegate (("Server" ←) ≽ ("Client" ←)) bot
-  withStrategy ["Client"] $ do
-    connect ("127.0.0.1", "8000", "Server") $ \(socket :: LSocket Msg) -> do
-      ships >>= evalBattleshipT (attack "Client" socket)
+  addDelegate (("Client" →), ("Server" →)) bot
+  addDelegate (("Server" ←), ("Client" ←)) bot
+  withStrategy [bot] $ do
+    connect ("127.0.0.1", "8000", "Server") $ \socket -> do
+      ships >>= evalBattleshipT (attack bot socket)
     return ()
 
 runExample :: IO ()
