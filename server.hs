@@ -1,7 +1,6 @@
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables, LambdaCase, PostfixOperators #-}
+module BattleShipServer where
 
-module Example.Network where
 import Lib.FLAM
 import Lib.LIO
 import Control.Monad.State
@@ -26,12 +25,13 @@ example :: FLAMIO ()
 example = do
   addDelegate (("Client" →), ("Server" →)) bot
   addDelegate (("Server" ←), ("Client" ←)) bot
-  withStrategy [bot] $ do
+  withStrategy (Strategy [bot]) $ do
     serve ("127.0.0.1", "8000", "Client") $ \socket -> do
       ships >>= evalBattleshipT (await bot socket)
+    
   return ()
 
 runExample :: IO ()
 runExample =
   evalStateT (unLIO (runFLAM example))
-  (BoundedLabel { _cur = bot, _clearance = ("Server" %) }, H Set.empty, [])
+  (BoundedLabel { _cur = bot, _clearance = ("Server" %) }, H Set.empty, noStrategy)

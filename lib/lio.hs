@@ -1,3 +1,5 @@
+{-# LANGUAGE DeriveFoldable #-}
+{-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE UndecidableInstances #-}
@@ -12,6 +14,8 @@ import Control.Monad.State.Class
 import Control.Monad.Catch
 import Control.Monad.Reader
 import GHC.Exts(Constraint)
+import Algebra.PartialOrd
+import qualified Data.List as List
 
 {- We need to seperate these two classes in order to call (⊔) and (⊔)
    without getting an ambiguity error since these two functions
@@ -25,7 +29,11 @@ data BoundedLabel l = BoundedLabel { _cur :: l, _clearance :: l }
 
 makeLenses ''BoundedLabel
 
-type Strategy l = [l]
+newtype Strategy l = Strategy { unStrategy :: [l] }
+  deriving (Eq, Ord, Functor, Traversable, Foldable)
+
+instance Eq l => PartialOrd (Strategy l) where
+  x `leq` y = unStrategy x `List.isPrefixOf` unStrategy y
 
 newtype LIO s l a = LIO { unLIO :: StateT (BoundedLabel l, s, Strategy l) IO a }
 
@@ -128,17 +136,18 @@ infixr 7 <||>
 (∈) :: (MonadLIO s l m, Label s l, C s l m) => l -> BoundedLabel l -> m Bool
 (∈) l lab = view cur lab ⊑ l <&&> l ⊑ view clearance lab
 
-label :: (MonadLIO s l m, Label s l, C s l m) => l -> a -> m (Labeled l a)
-label l x = do
+label :: (MonadLIO s l m, Label s l, C s l m, ToLabel c l) => c -> a -> m (Labeled l a)
+label c x = do
   lab <- liftLIO $ gets $ view _1
-  b <- l ∈ lab
+  b <- (%) l ∈ lab
   unless b $
     fail ("IFC violation (label): " ++
            show (view cur lab) ++
            " ⊑ " ++ show l ++
            " ⊑ " ++ show (view clearance lab))
   return $ Labeled {_labeledLab = l, _labeledVal = x }
-
+  where l = (%) c
+  
 unlabel :: (MonadLIO s l m, Label s l, C s l m) => Labeled l a -> m a
 unlabel lab = do
   raise "unlabel" (labelOf lab)
