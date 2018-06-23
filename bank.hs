@@ -83,7 +83,14 @@ instance Serializable Request where
 
   maxSize _ = 1 + maxSize (undefined :: Int) + 2 * maxSize (undefined :: (User, Account))
 
-data Response = Ack | Balance Int | NoSuchAccount | NoSuchUser | NonEmptyAccount | ProtocolError
+data Response
+  = Ack
+  | Balance Int
+  | NoSuchAccount
+  | NoSuchUser
+  | NonEmptyAccount
+  | ProtocolError
+  | NotSufficientFunds
 
 instance Serializable Response where
   encode Ack = B.singleton 0 
@@ -92,6 +99,7 @@ instance Serializable Response where
   encode NoSuchUser = B.singleton 3
   encode NonEmptyAccount = B.singleton 4
   encode ProtocolError = B.singleton 5
+  encode NotSufficientFunds = B.singleton 6
   
   decode bs =
     case B.uncons bs of
@@ -101,6 +109,7 @@ instance Serializable Response where
       Just (3, bs') | bs' == B.empty -> Just NoSuchUser
       Just (4, bs') | bs' == B.empty -> Just NonEmptyAccount
       Just (5, bs') | bs' == B.empty -> Just ProtocolError
+      Just (6, bs') | bs' == B.empty -> Just NotSufficientFunds
       _ -> Nothing
 
   maxSize _ = 1 + maxSize (undefined :: Int)
