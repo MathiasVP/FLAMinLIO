@@ -62,6 +62,7 @@ data Request
   | CloseAccount User Account
   | StartSession User
   | EndSession
+  deriving Show
 
 instance Serializable Request where
   encode (GetBalance u a) = B.cons 0 (encode (u, a))
@@ -91,6 +92,7 @@ data Response
   | NonEmptyAccount
   | ProtocolError
   | NotSufficientFunds
+  deriving Show
 
 instance Serializable Response where
   encode Ack = B.singleton 0 

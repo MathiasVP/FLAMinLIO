@@ -38,8 +38,6 @@ import Algebra.PartialOrd
 import Algebra.Lattice.Op
 import Data.Foldable
 
-import Data.POMap.Internal(mkPOMap, POMap(..))
-
 import Data.Proxy
 
 {- For networking -}
@@ -49,10 +47,6 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Char8 as B8
 import qualified Network.Simple.TCP as Net
-
-{- TODO: Hopefully this will be put into the POMaps module at some point -}
-takeWhileAntitone :: (k -> Bool) -> POMap k a -> POMap k a
-takeWhileAntitone p (POMap _ d) = mkPOMap (Map.takeWhileAntitone p <$> d)
 
 listview :: Ord a => Set a -> [a]
 listview = Set.toList
@@ -395,7 +389,7 @@ searchFailedCache (cur, clr) (p, q) = do
   h <- liftLIO $ gets $ view _2
   strat <- liftLIO $ gets $ view _3
   (idx, assumptions) <- liftFLAMIO $ FLAMIO ask
-  let failedcache = takeWhileAntitone (`leq` Op (assumptions, strat, h)) (view failedCache cache)
+  let failedcache = POMap.takeWhileAntitone (`leq` Op (assumptions, strat, h)) (view failedCache cache)
   return $ searchSurePOMap (cur, clr) (p, q) idx failedcache
   
 searchProvedCache :: MonadFLAMIO m => (Principal, Principal) -> (Principal, Principal) -> m (Maybe Principal)
@@ -404,7 +398,7 @@ searchProvedCache (cur, clr) (p, q) = do
   h <- liftLIO $ gets $ view _2
   strat <- liftLIO $ gets $ view _3
   (idx, assumptions) <- liftFLAMIO $ FLAMIO ask
-  let provedcache = takeWhileAntitone (`leq` (assumptions, strat, h)) (view provedCache cache)
+  let provedcache = POMap.takeWhileAntitone (`leq` (assumptions, strat, h)) (view provedCache cache)
   return $ searchSurePOMap (cur, clr) (p, q) idx provedcache
   
 data CacheSearchResult l
