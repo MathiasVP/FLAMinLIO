@@ -23,9 +23,14 @@ inSession socket = do
           Just lacc ->
             Map.lookup a <$> unlabel lacc >>= \case
               Just bal -> do
+                liftIO $ putStrLn $ "Sending balance " ++ show bal
                 send socket clr (Right $ Balance bal)
-              Nothing -> send socket clr (Right NoSuchAccount)
-          Nothing -> send socket clr (Right NoSuchUser)
+              Nothing -> do
+                liftIO $ putStrLn $ "Sending NoSuchAccount"
+                send socket clr (Right NoSuchAccount)
+          Nothing -> do
+            liftIO $ putStrLn $ "Sending NoSuchUser"
+            send socket clr (Right NoSuchUser)
         inSession socket
       Left (Transfer n (uFrom, aFrom) (uTo, aTo)) -> do
         Map.lookup uFrom <$> get >>= \case
@@ -41,11 +46,31 @@ inSession socket = do
                         modify $ Map.insert uTo accTo'
                         accFrom' <- label uFrom $ Map.update (Just . (subtract n)) aFrom accFrom
                         modify $ Map.insert uFrom accFrom'
+                        liftIO $ putStrLn $ "Sending Ack"
                         send socket clr (Right Ack)
-                      Nothing -> send socket clr (Right NoSuchAccount)
-                | otherwise -> send socket clr (Right NotSufficientFunds)
-              Nothing -> send socket clr (Right NoSuchAccount)
-          Nothing -> send socket clr (Right NoSuchUser)
+                      Nothing -> do
+                        liftIO $ putStrLn $ "Sending NoSuchAccount"
+                        send socket clr (Right NoSuchAccount)
+                | otherwise -> do
+                    liftIO $ putStrLn $ "Sending NotSuccifientFunds"
+                    send socket clr (Right NotSufficientFunds)
+              Nothing -> do
+                liftIO $ putStrLn $ "Sending NoSuchAccount"
+                send socket clr (Right NoSuchAccount)
+          Nothing -> do
+            liftIO $ putStrLn $ "Sending NoSuchUser"
+            send socket clr (Right NoSuchUser)
+        inSession socket
+      Left (Create u) -> do
+        Map.lookup u <$> get >>= \case
+          Just _ -> do
+            liftIO $ putStrLn $ "Sending UserAlreadyExists"
+            send socket clr (Right UserAlreadyExists)
+          Nothing -> do
+            lacc <- label u Map.empty
+            modify $ Map.insert u lacc
+            liftIO $ putStrLn $ "Sending Ack"
+            send socket clr (Right Ack)
         inSession socket
       Left (OpenAccount u a) -> do
         Map.lookup u <$> get >>= \case
@@ -53,7 +78,11 @@ inSession socket = do
             acc <- unlabel lacc
             lacc' <- label u (Map.insert a 0 acc)
             modify $ Map.insert u lacc'
-          Nothing -> send socket clr (Right NoSuchUser)
+            liftIO $ putStrLn $ "Sending Ack"
+            send socket clr (Right Ack)
+          Nothing -> do
+            liftIO $ putStrLn $ "Sending NoSuchUser"
+            send socket clr (Right NoSuchUser)
         inSession socket
       Left (CloseAccount u a) -> do
         Map.lookup u <$> get >>= \case
@@ -63,16 +92,25 @@ inSession socket = do
               Just 0 -> do
                 lacc' <- label clr (Map.delete a acc)
                 modify $ Map.update (const $ Just lacc') u
-              Nothing -> send socket clr (Right NonEmptyAccount)
-          Nothing -> send socket clr (Right NoSuchUser)
+                liftIO $ putStrLn $ "Sending Ack"
+                send socket clr (Right Ack)
+              Nothing -> do
+                liftIO $ putStrLn $ "Sending NonEmptyAccount"
+                send socket clr (Right NonEmptyAccount)
+          Nothing -> do
+            liftIO $ putStrLn $ "Sending NoSuchUser"
+            send socket clr (Right NoSuchUser)
         inSession socket
       Left (StartSession _) -> do
+        liftIO $ putStrLn $ "Sending ProtocolError"
         send socket clr (Right ProtocolError)
         inSession socket
       Left EndSession -> do
+        liftIO $ putStrLn $ "Sending Ack"
         send socket clr (Right Ack)
         return ()
       Right _ -> do
+        liftIO $ putStrLn $ "Sending ProtocolError"
         send socket clr (Right ProtocolError)
         inSession socket
     _ -> return ()
@@ -80,22 +118,33 @@ inSession socket = do
 await :: LSocket (Either Request Response) -> BankT FLAMIO ()
 await socket = do
   recv socket >>= \case
-    Just lab -> unlabel lab >>= \case
-      Left (StartSession u) -> do
-        lbl <- getLabel
-        clr <- getClearance
-        send socket u (Right Ack)
-        liftLIO $ modify $ _1 . clearance .~ (u %)
-        inSession socket
-        liftLIO $ modify $ _1 . cur .~ lbl
-        liftLIO $ modify $ _1 . clearance .~ clr
-    _ -> await socket
+    Just lab -> do
+      newScope $ do
+        addDelegate (("BankServer" →), (labelOf lab →)) bot
+        addDelegate ((labelOf lab ←), ("BankServer" ←)) bot
+        
+        addDelegate ((labelOf lab →), ("BankClient" →)) bot
+        addDelegate (("BankClient" ←), (labelOf lab ←)) bot
+        
+        addDelegate (("BankClient" →), (labelOf lab →)) bot
+        addDelegate (((labelOf lab) ←), ("BankClient" ←)) bot
+
+        unlabel lab >>= \case
+          Left (StartSession u) -> do
+            lbl <- getLabel
+            clr <- getClearance
+            send socket u (Right Ack)
+            liftLIO $ modify $ _1 . clearance .~ (u %)
+            inSession socket
+            liftLIO $ modify $ _1 . cur .~ lbl
+            liftLIO $ modify $ _1 . clearance .~ clr
+    Nothing -> await socket
   
     
 example :: BankT FLAMIO ()
 example = do
-  addDelegate (("Client" →), ("Server" →)) bot
-  addDelegate (("Server" ←), ("Client" ←)) bot
+  addDelegate (("BankClient" →), ("BankServer" →)) bot
+  addDelegate (("BankServer" ←), ("BankClient" ←)) bot
   withStrategy (Strategy [bot]) $ do
     serve ("127.0.0.1", "8000", "BankClient") await
   return ()

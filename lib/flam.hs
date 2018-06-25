@@ -79,11 +79,11 @@ instance Show Principal where
     if n > 10 then showString "(" . showsPrec 11 p . showString " ∨ " . showsPrec 11 q . showString ")"
     else showsPrec 11 p . showString " ∨ " . showsPrec 11 q
   showsPrec n ((:→) p) =
-    if n > 10 then showString "(" . showsPrec 11 p . showString " ←" . showString ")"
-    else showsPrec 11 p . showString " ←"
-  showsPrec n ((:←) p) =
     if n > 10 then showString "(" . showsPrec 11 p . showString " →" . showString ")"
     else showsPrec 11 p . showString " →"
+  showsPrec n ((:←) p) =
+    if n > 10 then showString "(" . showsPrec 11 p . showString " ←" . showString ")"
+    else showsPrec 11 p . showString " ←"
   showsPrec n (p ::: q) =
     if n > 10 then showString "(" . showsPrec 11 p . showString " : " . showsPrec 11 q . showString ")"
     else showsPrec 11 p . showString " : " . showsPrec 11 q
@@ -959,16 +959,15 @@ type Host = (IP, Port, Name)
 channelLabel :: LSocket a -> String
 channelLabel (LSocket (_, s)) = s
   
-serve :: (MonadIO m, Serializable a, MonadMask m, MonadFLAMIO m) => Host -> (LSocket a -> m r) -> m (Labeled Principal r)
+serve :: (MonadIO m, Serializable a, MonadMask m, MonadFLAMIO m) => Host -> (LSocket a -> m r) -> m ()
 serve (ip, port, name) f = do
-  x <- Net.listen (Net.Host ip) port (\(socket, addr) -> Net.accept socket (\(socket', _) -> f (LSocket (socket', name))))
-  label name x
+  Net.listen (Net.Host ip) port (\(socket, addr) -> Net.accept socket (\(socket', _) -> f (LSocket (socket', name))))
+  return ()
   
-connect :: (MonadIO m, Serializable a, MonadMask m, MonadFLAMIO m) => Host -> (LSocket a -> m r)
-        -> m (Labeled Principal r)
+connect :: (MonadIO m, Serializable a, MonadMask m, MonadFLAMIO m) => Host -> (LSocket a -> m r) -> m ()
 connect (ip, port, name) f = do
-  x <- Net.connect ip port (\(socket, _) -> f (LSocket (socket, name)))
-  label name x
+  Net.connect ip port (\(socket, _) -> f (LSocket (socket, name)))
+  return ()
 
 {- Q: Is it really bad to send to a principal above your clearance?
       If we did not have this, the battleship example could avoid adding the delegations

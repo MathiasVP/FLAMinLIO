@@ -62,6 +62,7 @@ data Request
   | CloseAccount User Account
   | StartSession User
   | EndSession
+  | Create User
   deriving Show
 
 instance Serializable Request where
@@ -71,6 +72,7 @@ instance Serializable Request where
   encode (CloseAccount u a) = B.cons 3 (encode (u, a))
   encode (StartSession u) = B.cons 4 (encode u)
   encode EndSession = B.singleton 5
+  encode (Create u) = B.cons 6 (encode u)
 
   decode bs =
     case B.uncons bs of
@@ -80,6 +82,7 @@ instance Serializable Request where
       Just (3, bs') -> uncurry CloseAccount <$> decode bs'
       Just (4, bs') -> StartSession <$> decode bs'
       Just (5, bs') | bs' == B.empty -> Just EndSession
+      Just (6, bs') -> Create <$> decode bs'
       _ -> Nothing
 
   maxSize _ = 1 + maxSize (undefined :: Int) + 2 * maxSize (undefined :: (User, Account))
@@ -92,6 +95,7 @@ data Response
   | NonEmptyAccount
   | ProtocolError
   | NotSufficientFunds
+  | UserAlreadyExists
   deriving Show
 
 instance Serializable Response where
@@ -102,6 +106,7 @@ instance Serializable Response where
   encode NonEmptyAccount = B.singleton 4
   encode ProtocolError = B.singleton 5
   encode NotSufficientFunds = B.singleton 6
+  encode UserAlreadyExists = B.singleton 7
   
   decode bs =
     case B.uncons bs of
@@ -112,6 +117,7 @@ instance Serializable Response where
       Just (4, bs') | bs' == B.empty -> Just NonEmptyAccount
       Just (5, bs') | bs' == B.empty -> Just ProtocolError
       Just (6, bs') | bs' == B.empty -> Just NotSufficientFunds
+      Just (7, bs') | bs' == B.empty -> Just UserAlreadyExists
       _ -> Nothing
 
   maxSize _ = 1 + maxSize (undefined :: Int)

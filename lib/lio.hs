@@ -139,7 +139,7 @@ infixr 7 <||>
 label :: (MonadLIO s l m, Label s l, C s l m, ToLabel c l) => c -> a -> m (Labeled l a)
 label c x = do
   lab <- liftLIO $ gets $ view _1
-  b <- (%) l ∈ lab
+  b <- l ∈ lab
   unless b $
     fail ("IFC violation (label): " ++
            show (view cur lab) ++
@@ -153,25 +153,25 @@ unlabel lab = do
   raise "unlabel" (labelOf lab)
   return (view labeledVal lab)
 
-toLabeled :: (MonadLIO s l m, Label s l, C s l m) => l -> m a -> m (Labeled l a)
-toLabeled l m = do
+toLabeled :: forall s l m c a . (MonadLIO s l m, Label s l, C s l m, ToLabel c l) => c -> m a -> m (Labeled l a)
+toLabeled c m = do
   l' <- liftLIO $ gets $ view _1
   res <- m
   l'' <- liftLIO $ gets $ view $ _1 . cur
-  b <- l'' ⊑ l
+  b <- l'' ⊑ c
   unless b $ do
-    fail ("IFC violation (toLabeled): " ++ show l'' ++ " ⊑ " ++ show l)
+    fail ("IFC violation (toLabeled): " ++ show l'' ++ " ⊑ " ++ show ((%) c :: l))
   liftLIO $ modify $ (_1 .~ l')
-  label l res
+  label c res
 
-toLabeled_ :: (MonadLIO s l m, Label s l, C s l m) => l -> m a -> m ()
-toLabeled_ l m = do
+toLabeled_ :: forall s l m c a . (MonadLIO s l m, Label s l, C s l m, ToLabel c l) => c -> m a -> m ()
+toLabeled_ c m = do
   l' <- liftLIO $ gets $ view _1
   res <- m
   l'' <- liftLIO $ gets $ view $ _1 . cur
-  b <- l'' ⊑ l
+  b <- l'' ⊑ c
   unless b $ do
-    fail ("IFC violation (toLabeled_): " ++ show l'' ++ " ⊑ " ++ show l)
+    fail ("IFC violation (toLabeled_): " ++ show l'' ++ " ⊑ " ++ show ((%) c :: l))
   liftLIO $ modify $ (_1 .~ l')
 
 getStrategy :: (MonadLIO s l m, Label s l, C s l m) => m (Strategy l)
@@ -182,18 +182,18 @@ labelOf = view labeledLab
 
 newtype LIORef l a = LIORef { unLIORef :: Labeled l (IORef a) }
 
-newRef :: (MonadLIO s l m, Label s l, C s l m) => l -> a -> m (LIORef l a)
-newRef l x = do
+newRef :: forall s l m c a . (MonadLIO s l m, Label s l, C s l m, ToLabel c l) => c -> a -> m (LIORef l a)
+newRef c x = do
   lab <- liftLIO $ gets $ view _1
-  b <- l ∈ lab
+  b <- ((%) c) ∈ lab
   liftLIO . LIO . StateT $ \(lab, s, strat) -> do
   unless b $
     fail ("IFC violation (new): " ++
            show (view cur lab) ++
-           " ⊑ " ++ show l ++
+           " ⊑ " ++ show ((%) c :: l) ++
            " ⊑ " ++ show (view clearance lab))
   r <- newIORef x
-  return (LIORef (Labeled {_labeledLab = l, _labeledVal = r}), (lab, s, strat))
+  return (LIORef (Labeled {_labeledLab = (%) c, _labeledVal = r}), (lab, s, strat))
 
 readRef :: (MonadLIO s l m, Label s l, C s l m) => LIORef l a -> m a
 readRef (LIORef lref) =
