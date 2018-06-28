@@ -1,3 +1,4 @@
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -17,6 +18,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 module Lib.FLAM where
 
+import Prelude hiding ((^))
 import Lib.LIO
 import Lib.TCB()
 import qualified Data.List as List
@@ -108,15 +110,15 @@ newtype J = J { unJ :: Set M } -- M₁ /\ M₂ /\ ... /\ Mₙ
 data JNF = JNF { confidentiality :: !J, integrity :: !J }
   deriving (Show, Eq, Ord)
 
-data ProgressCondition l
-  = ActsFor !l !l
-  | Conj !(ProgressCondition l) !(ProgressCondition l)
-  | Disj !(ProgressCondition l) !(ProgressCondition l)
+data ProgressCondition
+  = ActsFor !Principal !Principal
+  | Conj !(ProgressCondition) !(ProgressCondition)
+  | Disj !(ProgressCondition) !(ProgressCondition)
   | TrueCondition
   | FalseCondition
   deriving Eq
 
-instance Show l => Show (ProgressCondition l) where
+instance Show (ProgressCondition) where
   showsPrec n (ActsFor x y) =
     if n > 10 then showString "(" . showsPrec 11 x . showString " ≽ " . showsPrec 11 y . showString ")"
     else showsPrec 11 x . showString " ≽ " . showsPrec 11 y
@@ -129,7 +131,7 @@ instance Show l => Show (ProgressCondition l) where
   showsPrec _ TrueCondition = showString "True"
   showsPrec _ FalseCondition = showString "False"
 
-type Assumptions = Map Int (Principal, Principal)
+type Assumptions = Map Int (Set (Principal, Principal))
 newtype StepIndexT m a = StepIndexT { unStepIndexT :: ReaderT (Int, Assumptions) m a }
   deriving (Functor, Applicative, Monad, MonadReader (Int, Assumptions))
 
@@ -146,24 +148,20 @@ instance PartialOrd Principal where
 instance PartialOrd H where
   H x `leq` H y = x `leq` y
 
-type SureCache l = Map (l, l) (Map Int (Map (l, l) l))
-type UnsureCache l = Map Int (Map (l, l) (ProgressCondition l))
+type SureCache = Map (Principal, Principal) (Map Int (Map (Principal, Principal) Principal))
+type UnsureCache = Map Int (Map (Principal, Principal) (ProgressCondition))
 
-type ReachabilityCache l = Map (Set (l, l)) ((Set (J, J), Set (J, J)))
-type ProvedCache l = POMap (Assumptions, Strategy l, H) (SureCache l)
--- NOTE: The fact that PrunedCache is a map from assumptions to pruned results means
--- that we have a lot of pruned cache misses.
--- This is without a doubt the main source of slowdown currently. But we cannot have it in a partial ordered map
--- with either subset of superset inclusion since we don't know if the result ends up being proved or failed. Hmmm....
-type PrunedCache l = Map Assumptions (Map (l, l) (UnsureCache l))
-type FailedCache l = POMap (Op (Assumptions, Strategy l, H)) (SureCache l)
-data Cache l = Cache { _reachabilityCache :: !(ReachabilityCache l),
-                     _provedCache :: !(ProvedCache l),
-                     _prunedCache :: !(PrunedCache l),
-                     _failedCache :: !(FailedCache l) }
+type ReachabilityCache = Map (Set ((Principal, Principal), Assumptions)) ((Set ((J, J), Assumptions), Set ((J, J), Assumptions)))
+type ProvedCache = POMap (Assumptions, Strategy Principal, H) SureCache
+type PrunedCache = Map Assumptions (Map (Principal, Principal) UnsureCache)
+type FailedCache = POMap (Op (Assumptions, Strategy Principal, H)) SureCache
+data Cache = Cache { _reachabilityCache :: !ReachabilityCache,
+                     _provedCache :: !ProvedCache,
+                     _prunedCache :: !PrunedCache,
+                     _failedCache :: !FailedCache }
 makeLenses ''Cache
 
-emptyCache :: Cache Principal
+emptyCache :: Cache
 emptyCache = Cache { _reachabilityCache = Map.empty,
                      _provedCache = POMap.empty,
                      _prunedCache = Map.empty,
@@ -174,7 +172,7 @@ newtype Replacement t = Replacement t
 newtype Pattern t = Pattern t
 
 -- substitute oldpc newpc pc means pc[oldpc -> newpc]
-substitute :: Eq l => Pattern (ProgressCondition l) -> Replacement (ProgressCondition l) -> Original (ProgressCondition l) -> ProgressCondition l
+substitute :: Pattern ProgressCondition -> Replacement ProgressCondition -> Original ProgressCondition -> ProgressCondition
 substitute (Pattern oldpc) (Replacement newpc) (Original pc) | oldpc == pc = newpc
 substitute oldpc newpc (Original (Conj pc1 pc2)) =
   Conj (substitute oldpc newpc (Original pc1)) (substitute oldpc newpc (Original pc2))
@@ -182,23 +180,31 @@ substitute oldpc newpc (Original (Disj pc1 pc2)) =
   Disj (substitute oldpc newpc (Original pc1)) (substitute oldpc newpc (Original pc2))
 substitute _ _ (Original pc) = pc
 
-data QueryResult l
-  = Failed
-  | Success
-  | Pruned !(ProgressCondition l)
+data QueryResult
+  = Failed !Assumptions
+  | Success !Assumptions
+  | Pruned !(ProgressCondition) !Assumptions
   deriving Show
 
-liftB :: Bool -> QueryResult l
-liftB True = Success
-liftB False = Failed
+(^) :: QueryResult -> Assumptions -> QueryResult
+Failed a1 ^ a2 = Failed (Map.union a1 a2)
+Success a1 ^ a2 = Success (Map.union a1 a2)
+Pruned pc a1 ^ a2 = Pruned pc (Map.union a1 a2)
 
-lowerB :: MonadFLAMIO m => Int -> QueryResult Principal -> m Bool
-lowerB idx Success = return True
-lowerB idx Failed = return False
-lowerB idx (Pruned pc) =
-  isTrue idx pc >>= \case
-    Just b -> return b
-    Nothing -> return False
+liftB :: Assumptions -> Bool -> QueryResult
+liftB a True = Success a
+liftB a False = Failed a
+
+lowerB' :: MonadFLAMIO m => Int -> QueryResult -> m (Bool, Assumptions)
+lowerB' idx (Success a) = return (True, a)
+lowerB' idx (Failed a) = return (False, a)
+lowerB' idx (Pruned pc a) =
+  isTrue a idx pc >>= \case
+    Just b -> return (b, a)
+    Nothing -> return (False, a)
+
+lowerB :: MonadFLAMIO m => Int -> QueryResult -> m Bool
+lowerB idx r = fst <$> lowerB' idx r
   
 setFilterMapM :: (Ord a, Ord b, Monad m) => (a -> m (Maybe b)) -> Set a -> m (Set b)
 setFilterMapM f s = visit s Set.empty
@@ -208,28 +214,28 @@ setFilterMapM f s = visit s Set.empty
             Nothing -> visit as s
             Just b -> visit as (Set.insert b s)
 
-(<&&&>) :: (Monad m) => m (QueryResult l) -> m (QueryResult l) -> m (QueryResult l)
+(<&&&>) :: (Monad m) => m QueryResult -> m QueryResult -> m QueryResult
 (<&&&>) m1 m2 =
   m1 >>= \case
-    Success -> m2
-    Failed -> return Failed
-    Pruned pc1 ->
+    Success a -> (^) <$> m2 <*> pure a
+    Failed a -> return $ Failed a
+    Pruned pc1 a1 ->
       m2 >>= \case
-        Success -> return $ Pruned pc1
-        Failed -> return Failed
-        Pruned pc2 -> return $ Pruned $ pc1 `Conj` pc2
+        Success a2 -> return $ Pruned pc1 (a1 `Map.union` a2)
+        Failed a2 -> return $ Failed (a1 `Map.union` a2)
+        Pruned pc2 a2 -> return $ Pruned (pc1 `Conj` pc2) (a1 `Map.union` a2)
 infixr 8 <&&&>
 
-(<|||>) :: (Monad m) => m (QueryResult l) -> m (QueryResult l) -> m (QueryResult l)
+(<|||>) :: (Monad m) => m QueryResult -> m QueryResult -> m QueryResult
 (<|||>) m1 m2 =
   m1 >>= \case
-    Success -> return Success
-    Failed -> m2
-    Pruned pc1 ->
+    Success a -> return $ Success a
+    Failed a -> (^) <$> m2 <*> pure a
+    Pruned pc1 a1 ->
       m2 >>= \case
-        Success -> return Success
-        Failed -> return $ Pruned pc1
-        Pruned pc2 -> return $ Pruned $ pc1 `Disj` pc2
+        Success a2 -> return $ Success (a1 `Map.union` a2)
+        Failed a2 -> return $ Pruned pc1 (a1 `Map.union` a2)
+        Pruned pc2 a2 -> return $ Pruned (pc1 `Disj` pc2) (a1 `Map.union` a2)
 infixr 7 <|||>
 
 mapMapMaybeM :: (Monad m, Ord k) => (a -> m (Maybe b)) -> Map k a -> m (Map k b)
@@ -244,30 +250,35 @@ mapMapWithKeyM f m = do
   ys <- mapM (uncurry f) xs
   return $ Map.fromList (zipWith (\(k, _) y -> (k, y)) xs ys)
 
-isTrue :: MonadFLAMIO m => Int -> ProgressCondition Principal -> m (Maybe Bool)
-isTrue idx (ActsFor p q) = do
+(⇒) :: Assumptions -> Assumptions -> Bool
+(⇒) = flip Map.isSubmapOf
+
+isTrue :: MonadFLAMIO m => Assumptions -> Int -> ProgressCondition -> m (Maybe Bool)
+isTrue a idx (ActsFor p q) = do
   (_, assumptions) <- liftFLAMIO $ FLAMIO $ ask
   let assumptions' = Map.takeWhileAntitone (<= idx) assumptions
-  b <- reach (p, q) (Set.fromAscList . Map.elems $ assumptions')
+  -- TODO: This mapping is weird.
+  -- Also I don't think we should be ignoring the assumptions coming out here?
+  (b, _) <- reach (p, q) (Set.map (, Map.empty) (Set.unions . Map.elems $ assumptions'))
   case b of
-    True -> return $ Just True
+    True -> return $ Just (a ⇒ assumptions')
     False -> return Nothing
-isTrue idx (Conj pc1 pc2) =
-  isTrue idx pc1 >>= \case
-    Just True -> isTrue idx pc2
+isTrue a idx (Conj pc1 pc2) =
+  isTrue a idx pc1 >>= \case
+    Just True -> isTrue a idx pc2
     Just False -> return $ Just False
     Nothing -> return $ Nothing
-isTrue idx (Disj pc1 pc2) =
- isTrue idx pc1 >>= \case
+isTrue a idx (Disj pc1 pc2) =
+ isTrue a idx pc1 >>= \case
    Just True -> return $ Just True
-   Just False -> isTrue idx pc1
+   Just False -> isTrue a idx pc1
    Nothing -> return $ Nothing
-isTrue _ TrueCondition = return $ Just True
-isTrue _ FalseCondition = return $ Just False
+isTrue _ _ TrueCondition = return $ Just True
+isTrue _ _ FalseCondition = return $ Just False
 
-isFalse :: MonadFLAMIO m => Int -> ProgressCondition Principal -> m (Maybe Bool)
-isFalse idx pc =
-  isTrue idx pc >>= \case
+isFalse :: MonadFLAMIO m => Assumptions -> Int -> ProgressCondition -> m (Maybe Bool)
+isFalse a idx pc =
+  isTrue a idx pc >>= \case
     Just b -> return $ Just $ not b
     Nothing -> return $ Nothing
 
@@ -279,9 +290,9 @@ mapMaybeKeepM f (mapview -> Just ((k, a), m)) = do
     Just b -> return (m1, Map.insert k b m2)
     Nothing -> return (Map.insert k a m1, m2)
 
-alterSure :: Ord l => (Maybe (Map Int (Map (l, l) l)) -> Maybe (Map Int (Map (l, l) l))) ->
-             l -> l ->
-             Maybe (SureCache l) -> Maybe (SureCache l)
+alterSure :: (Maybe (Map Int (Map (Principal, Principal) Principal)) -> Maybe (Map Int (Map (Principal, Principal) Principal))) ->
+             Principal -> Principal ->
+             Maybe SureCache -> Maybe SureCache
 alterSure f cur clr Nothing = Map.singleton (cur, clr) <$> f Nothing
 alterSure f cur clr (Just m) = Map.insert (cur, clr) <$> f (Map.lookup (cur, clr) m) <*> pure m
 
@@ -291,9 +302,9 @@ insert p q idx cur (Just map) =
     Just m -> Map.insert idx (Map.insert (p, q) cur m) map
     Nothing -> Map.insert idx (Map.singleton (p, q) cur) map
 
-updatePruned :: (Eq l, Monad m) => Int -> l -> l -> ProgressCondition l ->
-                (Int -> ProgressCondition l -> m (Maybe Bool)) -> ProgressCondition l ->
-                m (Maybe (ProgressCondition l))
+updatePruned :: (Monad m) => Int -> Principal -> Principal -> ProgressCondition ->
+                (Int -> ProgressCondition -> m (Maybe Bool)) -> ProgressCondition ->
+                m (Maybe ProgressCondition)
 updatePruned idx p q rep cond progCond = do
           let progCond' = substitute (Pattern (ActsFor p q)) (Replacement rep) (Original progCond)
           cond idx progCond' >>= \case
@@ -304,95 +315,139 @@ updatePruned idx p q rep cond progCond = do
             Nothing -> do
               return $ Just progCond'
 
-update :: forall m . MonadFLAMIO m => (Principal, Principal) -> Int -> (Principal, Principal) -> QueryResult Principal -> m ()
-update (cur, clr) idx (p, q) Success = do
+adjustPOMapGT :: PartialOrd k => (a -> a) -> k -> POMap k a -> POMap k a
+adjustPOMapGT f k m =
+  let m' = POMap.dropWhileAntitone (`leq` k) m
+  in POMap.foldlWithKey' insert m m'
+  where insert m k a = POMap.insert k (f a) m
+
+adjustMapGE :: Ord k => (a -> a) -> k -> Map k a -> Map k a
+adjustMapGE f k m =
+  let m' = Map.dropWhileAntitone (<= k) m
+  in case Map.lookup k m of
+       Nothing -> Map.foldlWithKey' insert m m'
+       Just v -> Map.insert k (f v) $ Map.foldlWithKey' insert m m'
+     where insert m k v = Map.insert k (f v) m
+
+adjustMapLE :: Ord k => (a -> a) -> k -> Map k a -> Map k a
+adjustMapLE f k m =
+  let m' = Map.takeWhileAntitone (<= k) m
+  in case Map.lookup k m of
+       Nothing -> Map.foldlWithKey' insert m m'
+       Just v -> Map.insert k (f v) $ Map.foldlWithKey' insert m m'
+     where insert m k v = Map.insert k (f v) m
+
+adjustOrInsert :: Ord k => (Maybe a -> a) -> k -> Map k a -> Map k a
+adjustOrInsert f k m =
+  case Map.lookup k m of
+    Just v -> Map.insert k (f (Just v)) m
+    Nothing -> Map.insert k (f Nothing) m
+
+update :: forall m . MonadFLAMIO m => (Principal, Principal) -> Int -> (Principal, Principal) -> QueryResult -> m ()
+update (cur, clr) idx (p, q) (Success a) = do
   cur' <- liftLIO getLabel
   h <- liftLIO $ gets $ view _2
   strat <- liftLIO $ gets $ view _3
-  assumptions <- liftFLAMIO $ FLAMIO $ asks snd
-  liftFLAMIO $ modifyCache $ over provedCache $ POMap.alter (alterSure (Just . insert p q idx cur') cur clr) (assumptions, strat, h)
-  liftFLAMIO $ modifyCache $ over prunedCache $ Map.update (Just . Map.update (Just . Map.mapWithKey delete) (cur, clr)) assumptions
-  prunedmap <- Map.lookup assumptions <$> liftFLAMIO (getsCache (view prunedCache)) >>= \case
+  liftFLAMIO $ modifyCache $ over provedCache $ adjustPOMapGT (adjustOrInsert (insert p q idx cur') (cur, clr)) (a, strat, h)
+  liftFLAMIO $ modifyCache $ over provedCache $ POMap.alter (alterSure (Just . insert p q idx cur') cur clr) (a, strat, h)
+  liftFLAMIO $ modifyCache $ over prunedCache $ adjustMapGE (Map.adjust (Map.mapWithKey delete) (cur, clr)) a
+  prunedmap <- Map.lookup a <$> liftFLAMIO (getsCache (view prunedCache)) >>= \case
     Just prunedmap ->
       case Map.lookup (cur, clr) prunedmap of
-        Just pm -> mapMapWithKeyM (\idx' -> if idx <= idx' then mapMapMaybeM (updatePruned idx p q TrueCondition isTrue)
-                                            else return) pm
+        Just pm -> mapMapWithKeyM f pm
+          where f idx' =
+                  if idx <= idx' then
+                    mapMapMaybeM (updatePruned idx p q TrueCondition (isTrue a)) --TODO: Is a correct here?
+                  else return
         Nothing -> return Map.empty
     Nothing -> return Map.empty
-  liftFLAMIO $ modifyCache $ over prunedCache $ Map.alter (Just . \case
-                                                              Just m -> Map.insert (cur, clr) prunedmap m
-                                                              Nothing -> Map.singleton (cur, clr) prunedmap
-                                                          ) assumptions
-  where delete idx' m = if idx <= idx' then Map.delete (cur, clr) m else m
+  liftFLAMIO $ modifyCache $ over prunedCache $
+    Map.alter (Just . \case
+                  Just m -> Map.insert (cur, clr) prunedmap m
+                  Nothing -> Map.singleton (cur, clr) prunedmap
+              ) a
+  where delete idx' m = if idx <= idx' then Map.delete (p, q) m else m
   
-update (cur, clr) idx (p, q) (Pruned pc) = do
+update (cur, clr) idx (p, q) (Pruned pc a) = do
   h <- liftLIO $ gets $ view _2
   strat <- liftLIO $ gets $ view _3
-  assumptions <- liftFLAMIO $ FLAMIO $ asks snd
-  liftFLAMIO $ modifyCache $ over prunedCache $ Map.update (Just . Map.alter (Just . insert p q idx pc) (cur, clr)) assumptions
-  prunedmap <- Map.lookup assumptions <$> liftFLAMIO (getsCache (view prunedCache)) >>= \case
+  liftFLAMIO $ modifyCache $ over prunedCache $ Map.adjust (Map.alter (Just . insert p q idx pc) (cur, clr)) a
+  prunedmap <- Map.lookup a <$> liftFLAMIO (getsCache (view prunedCache)) >>= \case
     Just prunedmap ->
       case Map.lookup (cur, clr) prunedmap of
         Just pm -> return $ Map.mapWithKey (\idx' -> if idx <= idx' then Map.map (updatePruned idx) else id) pm
         Nothing -> return Map.empty
     Nothing -> return Map.empty
-  liftFLAMIO $ modifyCache $ over prunedCache $ Map.alter (Just . \case
-                                                            Just m -> Map.insert (cur, clr) prunedmap m
-                                                            Nothing -> Map.singleton (cur, clr) prunedmap
-                                                        ) assumptions
-  where updatePruned :: Int -> ProgressCondition Principal -> ProgressCondition Principal
+  liftFLAMIO $ modifyCache $ over prunedCache $
+    Map.alter (Just . \case
+                  Just m -> Map.insert (cur, clr) prunedmap m
+                  Nothing -> Map.singleton (cur, clr) prunedmap
+              ) a
+  where updatePruned :: Int -> ProgressCondition -> ProgressCondition
         updatePruned idx = substitute (Pattern (ActsFor p q)) (Replacement pc) . Original
         
-update (cur, clr) idx (p, q) Failed = do
+update (cur, clr) idx (p, q) (Failed a) = do
   cur' <- liftLIO getLabel
   h <- liftLIO $ gets $ view _2
   strat <- liftLIO $ gets $ view _3
-  assumptions <- liftFLAMIO $ FLAMIO $ asks snd
-  liftFLAMIO $ modifyCache $ over failedCache $ POMap.alter
-    (alterSure (Just . insert p q idx cur') cur clr) (Op (assumptions, strat, h))
-  liftFLAMIO $ modifyCache $ over prunedCache $ Map.update (Just . Map.update (Just . Map.mapWithKey delete) (cur, clr)) assumptions
+  liftFLAMIO $ modifyCache $ over failedCache $ adjustPOMapGT (adjustOrInsert (insert p q idx cur') (cur, clr)) (Op (a, strat, h))
+  liftFLAMIO $ modifyCache $ over failedCache $ POMap.alter (alterSure (Just . insert p q idx cur') cur clr) (Op (a, strat, h))
+  liftFLAMIO $ modifyCache $ over prunedCache $ adjustMapLE (Map.update (Just . Map.mapWithKey delete) (cur, clr)) a
 
-  (new, prunedmap) <- Map.lookup assumptions <$> liftFLAMIO (getsCache (view prunedCache)) >>= \case
-    Just prunedmap ->
-      case Map.lookup (cur, clr) prunedmap of
-        Just prunedmap ->
-          foldrM (\(idx', m) (new, pruned) -> do
-                     (new', pruned') <- mapMaybeKeepM (updatePruned idx p q FalseCondition isFalse) m
-                     return ((idx', new') : new, (idx', pruned') : pruned)
-                 ) ([], []) (Map.toList prunedmap')
-          where prunedmap' = Map.filterWithKey (\idx' -> if idx <= idx' then const True else const False) prunedmap
-        Nothing -> return ([], [])
-    Nothing -> return ([], [])
-  liftFLAMIO $ modifyCache $ over prunedCache $ Map.insert assumptions ((Map.insert (cur, clr) (List.foldr (uncurry Map.insert) Map.empty prunedmap)) Map.empty)
-  forM_ new $ \(idx', m) -> mapM_ (\(p, q) -> update (cur, clr) idx' (p, q) Failed) (Map.keys m)
-     where delete idx' m = if idx <= idx' then Map.delete (cur, clr) m else m
-
+  pruned <- Map.takeWhileAntitone (`leq` a) <$> (liftFLAMIO $ getsCache $ view prunedCache)
+  forM_ (Map.toList pruned) $ \(assumptions, prunedmap) -> do
+    case Map.lookup (cur, clr) prunedmap of
+      Just prunedmap1 ->
+        mapM_ (\(idx', m) -> do
+                  (new', pruned') <- mapMaybeKeepM (updatePruned idx p q FalseCondition (isFalse a)) m -- TODO: Is a correct here?
+                  mapM_ (\(p, q) -> update (cur, clr) idx' (p, q) (Failed a)) (Map.keys m) -- TODO: Is a correct here?
+                  let adjust :: Maybe UnsureCache -> UnsureCache
+                      adjust Nothing = Map.singleton idx' pruned'
+                      adjust (Just m) = Map.insert idx' pruned' m
+                  liftFLAMIO $ modifyCache $ over prunedCache $ Map.adjust (adjustOrInsert adjust (cur, clr)) assumptions
+              ) (Map.toList prunedmap1')
+        where prunedmap1' = Map.filterWithKey (\idx' -> if idx <= idx' then const True else const False) prunedmap1
+      Nothing -> return ()
+     where delete idx' m = if idx <= idx' then Map.delete (p, q) m else m
+ 
 searchSureCache :: (Principal, Principal) -> Int ->
                    Map Int (Map (Principal, Principal) Principal) -> Maybe Principal
 searchSureCache (p, q) idx m =
   let m' = Map.takeWhileAntitone (<= idx) m
   in Map.lookup (p, q) (Map.unions $ Map.elems m')
-
-searchSurePOMap (cur, clr) (p, q) idx m = search (POMap.elems m)
-  where search :: [SureCache Principal] -> Maybe Principal
-        search [] = Nothing
-        search (c : cs) =
+  
+searchSurePOMap :: (Principal, Principal) -> (Principal, Principal) -> Int ->
+                   POMap (Assumptions, Strategy Principal, H) SureCache -> Maybe (Principal, Assumptions)
+searchSurePOMap (cur, clr) (p, q) idx m = search (POMap.toList m)
+  where search [] = Nothing
+        search (((a, _, _), c) : cs) =
           case Map.lookup (cur, clr) c of
           Just m -> case searchSureCache (p, q) idx m of
-                      Just p -> Just p
+                      Just p -> Just (p, a)
                       Nothing -> search cs
           Nothing -> search cs
 
-searchFailedCache :: MonadFLAMIO m => (Principal, Principal) -> (Principal, Principal) -> m (Maybe Principal)
+searchSurePOMapOp :: (Principal, Principal) -> (Principal, Principal) -> Int ->
+                     POMap (Op (Assumptions, Strategy Principal, H)) SureCache -> Maybe (Principal, Assumptions)
+searchSurePOMapOp (cur, clr) (p, q) idx m = search (POMap.toList m)
+  where search [] = Nothing
+        search ((Op (a, _, _), c) : cs) =
+          case Map.lookup (cur, clr) c of
+          Just m -> case searchSureCache (p, q) idx m of
+                      Just p -> Just (p, a)
+                      Nothing -> search cs
+          Nothing -> search cs
+
+searchFailedCache :: MonadFLAMIO m => (Principal, Principal) -> (Principal, Principal) -> m (Maybe (Principal, Assumptions))
 searchFailedCache (cur, clr) (p, q) = do
   cache <- liftFLAMIO getCache
   h <- liftLIO $ gets $ view _2
   strat <- liftLIO $ gets $ view _3
   (idx, assumptions) <- liftFLAMIO $ FLAMIO ask
   let failedcache = POMap.takeWhileAntitone (`leq` Op (assumptions, strat, h)) (view failedCache cache)
-  return $ searchSurePOMap (cur, clr) (p, q) idx failedcache
+  return $ searchSurePOMapOp (cur, clr) (p, q) idx failedcache
   
-searchProvedCache :: MonadFLAMIO m => (Principal, Principal) -> (Principal, Principal) -> m (Maybe Principal)
+searchProvedCache :: MonadFLAMIO m => (Principal, Principal) -> (Principal, Principal) -> m (Maybe (Principal, Assumptions))
 searchProvedCache (cur, clr) (p, q) = do
   cache <- liftFLAMIO $ getCache
   h <- liftLIO $ gets $ view _2
@@ -401,12 +456,12 @@ searchProvedCache (cur, clr) (p, q) = do
   let provedcache = POMap.takeWhileAntitone (`leq` (assumptions, strat, h)) (view provedCache cache)
   return $ searchSurePOMap (cur, clr) (p, q) idx provedcache
   
-data CacheSearchResult l
-  = ProvedResult !l
-  | FailedResult !l
-  | PrunedResult !(ProgressCondition l)
+data CacheSearchResult
+  = ProvedResult !Principal !Assumptions
+  | FailedResult !Principal !Assumptions
+  | PrunedResult !ProgressCondition !Assumptions
 
-searchPrunedCache :: MonadFLAMIO m => (Principal, Principal) -> (Principal, Principal) -> m (Maybe (ProgressCondition Principal))
+searchPrunedCache :: MonadFLAMIO m => (Principal, Principal) -> (Principal, Principal) -> m (Maybe (ProgressCondition, Assumptions))
 searchPrunedCache (cur, clr) (p, q) = do
   cache <- liftFLAMIO getCache
   h <- liftLIO $ gets $ view _2
@@ -417,19 +472,19 @@ searchPrunedCache (cur, clr) (p, q) = do
       case Map.lookup (cur, clr) uc of
         Just uc ->
           let uc' = Map.unions $ Map.elems $ Map.takeWhileAntitone (<= idx) uc
-          in return $ Map.lookup (p, q) uc'
+          in return ((,) <$> Map.lookup (p, q) uc' <*> pure assumptions)
         Nothing -> return Nothing
     Nothing -> return Nothing
-    
-searchcache :: MonadFLAMIO m => (Principal, Principal) -> (Principal, Principal) -> m (Maybe (CacheSearchResult Principal))
+
+searchcache :: MonadFLAMIO m => (Principal, Principal) -> (Principal, Principal) -> m (Maybe CacheSearchResult)
 searchcache (cur, clr) (p, q) = do
   let failedSearch = searchFailedCache (cur, clr) (p, q)
       prunedSearch = searchPrunedCache (cur, clr) (p, q)
       provedSearch = searchProvedCache (cur, clr) (p, q)
   (,,) <$> provedSearch <*> failedSearch <*> prunedSearch >>= \case
-    (Just cur', _, _) -> return $ Just $ ProvedResult cur'
-    (_, Just cur', _) -> return $ Just $ FailedResult cur'
-    (_, _, Just pc) -> return $ Just $ PrunedResult pc
+    (Just (cur', a), _, _) -> return $ Just $ ProvedResult cur' a
+    (_, Just (cur', a), _) -> return $ Just $ FailedResult cur' a
+    (_, _, Just (pc, a)) -> return $ Just $ PrunedResult pc a
     (_, _, _) -> return Nothing
 
 instance MonadLIO s l m => MonadLIO s l (StepIndexT m) where
@@ -441,111 +496,117 @@ instance MonadTrans StepIndexT where
 withLöb :: MonadFLAMIO m => (Principal, Principal) -> FLAMIO a -> m a
 withLöb (p, q) m = do
   (idx, _) <- liftFLAMIO $ FLAMIO ask
-  liftFLAMIO $ FLAMIO $ local (second $ Map.insert (idx + 1) (normalize p, normalize q)) (unFLAMIO m)
+  liftFLAMIO $ FLAMIO $ local (second $ adjustOrInsert insert (idx + 1)) (unFLAMIO m)
+  where insert Nothing = Set.singleton (normalize p, normalize q)
+        insert (Just s) = Set.insert (normalize p, normalize q) s
 
-(.≽.) :: MonadFLAMIO m => Principal -> Principal -> m (QueryResult Principal)
+(.≽.) :: MonadFLAMIO m => Principal -> Principal -> m QueryResult
 p .≽. q = do
   curLab <- liftLIO getLabel
   clrLab <- liftLIO getClearance
   (idx, _) <- liftFLAMIO $ FLAMIO ask
-  x <- searchcache (curLab, clrLab) (p, q)
-  case x of
-    Just (ProvedResult cur') -> do
-      liftLIO $ modify $ (_1 . cur) .~ cur'
-      return Success
-    Just (FailedResult cur') -> do
-      liftLIO $ modify $ (_1 . cur) .~ cur'
-      return Failed
-    Just (PrunedResult pc) -> do
-      return $ Pruned pc
-    Nothing -> do
-      update (curLab, clrLab) idx (p, q) (Pruned (ActsFor p q))
-      r <- withLöb (p, q) (p .≽ q)
-      update (curLab, clrLab) idx (p, q) r
-      return r
+  if idx > 3 then return $ Failed Map.empty
+  else do
+    x <- searchcache (curLab, clrLab) (p, q)
+    case x of
+      Just (ProvedResult cur' a) -> do
+        liftLIO $ modify $ (_1 . cur) .~ cur'
+        return $ Success a
+      Just (FailedResult cur' a) -> do
+        liftLIO $ modify $ (_1 . cur) .~ cur'
+        return $ Failed a
+      Just (PrunedResult pc a) -> do
+        return $ Pruned pc a
+      Nothing -> do
+        update (curLab, clrLab) idx (p, q) (Pruned (ActsFor p q) Map.empty)
+        r <- withLöb (p, q) (p .≽ q)
+        update (curLab, clrLab) idx (p, q) r
+        return r
 
-bot_ :: MonadFLAMIO m => (Principal, Principal) -> m (QueryResult Principal)
-bot_ (_, (:⊥)) = return Success
-bot_ (_, (((:→) (:⊥)) :/\ ((:←) (:⊥)))) = return Success
-bot_ _ = return Failed
+bot_ :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
+bot_ (_, (:⊥)) = return $ Success Map.empty
+bot_ (_, (((:→) (:⊥)) :/\ ((:←) (:⊥)))) = return $ Success Map.empty
+bot_ _ = return $ Failed Map.empty
 
-top_ :: MonadFLAMIO m => (Principal, Principal) -> m (QueryResult Principal)
-top_ ((:⊤), _) = return Success
-top_ ((((:→) (:⊤)) :/\ ((:←) (:⊤))), _) = return Success
-top_ _ = return Failed
+top_ :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
+top_ ((:⊤), _) = return $ Success Map.empty
+top_ ((((:→) (:⊤)) :/\ ((:←) (:⊤))), _) = return $ Success Map.empty
+top_ _ = return $ Failed Map.empty
 
-refl :: MonadFLAMIO m => (Principal, Principal) -> m (QueryResult Principal)
-refl (p, q) | p == q = return Success
-refl _ = return Failed
+refl :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
+refl (p, q) | p == q = return $ Success Map.empty
+refl _ = return $ Failed Map.empty
 
-proj :: MonadFLAMIO m => (Principal, Principal) -> m (QueryResult Principal)
+proj :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
 proj ((:→) p, (:→) q) = p .≽. q
 proj ((:←) p, (:←) q) = p .≽. q
-proj _ = return Failed
+proj _ = return $ Failed Map.empty
 
-projR :: MonadFLAMIO m => (Principal, Principal) -> m (QueryResult Principal)
-projR (p, (:←) q) | p == q = return Success
-projR (p, (:→) q) | p == q = return Success
-projR _ = return Failed
+projR :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
+projR (p, (:←) q) | p == q = return $ Success Map.empty
+projR (p, (:→) q) | p == q = return $ Success Map.empty
+projR _ = return $ Failed Map.empty
 
-own1 :: MonadFLAMIO m => (Principal, Principal) -> m (QueryResult Principal)
+own1 :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
 own1 (o ::: p, o' ::: p') = o .≽. o' <&&&> p .≽. p'
-own1 _ = return Failed
+own1 _ = return $ Failed Map.empty
 
-own2 :: MonadFLAMIO m => (Principal, Principal) -> m (QueryResult Principal)
+own2 :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
 own2 (o ::: p, o' ::: p') = o .≽. o' <&&&> p .≽. (o' ::: p')
-own2 _ = return Failed
+own2 _ = return $ Failed Map.empty
 
-conjL :: MonadFLAMIO m => (Principal, Principal) -> m (QueryResult Principal)
+conjL :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
 conjL (p1 :/\ p2, p) = p1 .≽. p <|||> p2 .≽. p
-conjL _ = return Failed
+conjL _ = return $ Failed Map.empty
 
-conjR :: MonadFLAMIO m => (Principal, Principal) -> m (QueryResult Principal)
+conjR :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
 conjR (p, p1 :/\ p2) = p .≽. p1 <&&&> p .≽. p2
-conjR _ = return Failed
+conjR _ = return $ Failed Map.empty
 
-disjL :: MonadFLAMIO m => (Principal, Principal) -> m (QueryResult Principal)
+disjL :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
 disjL (p1 :\/ p2, p) = p1 .≽. p <&&&> p2 .≽. p
-disjL _ = return Failed
+disjL _ = return $ Failed Map.empty
 
-disjR :: MonadFLAMIO m => (Principal, Principal) -> m (QueryResult Principal)
+disjR :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
 disjR (p, p1 :\/ p2) = p .≽. p1 <|||> p .≽. p2
-disjR _ = return Failed
+disjR _ = return $ Failed Map.empty
 
-reach :: MonadFLAMIO m => (Principal, Principal) -> Set (Principal, Principal) -> m Bool
+reach :: MonadFLAMIO m => (Principal, Principal) -> Set ((Principal, Principal), Assumptions) -> m (Bool, Assumptions)
 reach (p, q) s = do
   let pNorm = norm p
       qNorm = norm q
 
-  cache <- liftFLAMIO $ getsCache $ view reachabilityCache
   (sconf, sint) <- 
-    case Map.lookup s cache of
+    Map.lookup s <$> liftFLAMIO (getsCache $ view reachabilityCache) >>= \case
       Just (sconf, sint) -> return (sconf, sint)
       Nothing -> do
-        let sconf, sint :: Set (J, J)
+        let sconf, sint :: Set ((J, J), Assumptions)
             (sconf, sint) = (transitive *** transitive) .
-                          (atomize *** atomize) . expand $ s
+                            (atomize *** atomize) . expand $ s
         liftFLAMIO $ modifyCache $ over reachabilityCache (Map.insert s (sconf, sint))
         return (sconf, sint)
-  return $
-    (confidentiality pNorm, confidentiality qNorm) `Set.member` sconf &&
-    (integrity pNorm, integrity qNorm) `Set.member` sint
+  let sconf' = Map.fromList $ Set.elems sconf
+      sint' = Map.fromList $ Set.elems sint
+  case (Map.lookup (confidentiality pNorm, confidentiality qNorm) sconf',
+        Map.lookup (integrity pNorm, integrity qNorm) sint') of
+    (Just a1, Just a2) -> return (True, a1 `Map.union` a2)
+    _ -> return (False, Map.empty)
         
 {- Compute the expanded form of a delegation set -}
-expand :: Set (Principal, Principal) -> (Set (J, M), Set (J, M))
+expand :: Set ((Principal, Principal), Assumptions) -> (Set ((J, M), Assumptions), Set ((J, M), Assumptions))
 expand s = (expand' sconf, expand' sint)
   where
-    s' = Set.map (norm *** norm) s 
-    sconf :: Set (J, J)
-    sconf = Set.map (confidentiality *** confidentiality) s'
-    sint :: Set (J, J)
-    sint = Set.map (integrity *** integrity) s'
+    s' = Set.map (first $ norm *** norm) s 
+    sconf :: Set ((J, J), Assumptions)
+    sconf = Set.map (first $ confidentiality *** confidentiality) s'
+    sint :: Set ((J, J), Assumptions)
+    sint = Set.map (first $ integrity *** integrity) s'
 
-    expand' :: Set (J, J) -> Set (J, M)
-    expand' = Set.foldr' (\(p, J q) ->
-                            Set.union (Set.fromList [(p', q')
-                                                    | p' <- Set.toList ((⊗) p),
-                                                      q' <- Set.toList q])) Set.empty
+    expand' :: Set ((J, J), Assumptions) -> Set ((J, M), Assumptions)
+    expand' = Set.foldr' (\((p, J q), a) ->
+                            Set.union (Set.fromList [((p', q'), a)
+                                                     | p' <- Set.toList ((⊗) p),
+                                                       q' <- Set.toList q])) Set.empty
 
 {- Not actually the powerset: We're removing the empty set -}
 powerset :: Ord a => Set a -> Set (Set a)
@@ -557,17 +618,20 @@ powerset = Set.delete Set.empty .
 
 {- For every (b /\ b ...) ≽ (b \/ b ...) we want a node for each non-empty
    subsequence of conjs and disjs -}
-atomize :: Set (J, M) -> Set (J, J)
+atomize :: Set ((J, M), Assumptions) -> Set ((J, J), Assumptions)
 atomize s = Set.fromList
-            [(J p', J (Set.singleton (M q'))) |
-              (J p, M q) <- Set.toList s, p' <- Set.toList (powerset p), q' <- Set.toList (powerset q)]
+            [((J p', J (Set.singleton (M q'))), a) |
+             ((J p, M q), a) <- Set.toList s, p' <- Set.toList (powerset p), q' <- Set.toList (powerset q)]
 
 {- Compute transitive closure of a set -}
-transitive :: (Ord a, Eq a) => Set (a, a) -> Set (a, a)
+transitive :: Set ((J, J), Assumptions) -> Set ((J, J), Assumptions)
 transitive s
   | s == s' = s
   | otherwise = transitive s'
-  where s' = s `Set.union` Set.fromList [(a, c) | (a, b) <- Set.toList s, (b', c) <- Set.toList s, b == b']
+  where s' = s `Set.union` Set.fromList [((a, c), ass1 `Map.union` ass2)
+                                        | ((a, b), ass1) <- Set.toList s,
+                                          ((b', c), ass2) <- Set.toList s,
+                                          b == b']
 
 {- Join of meets into meet of joins -}
 (⊗) :: J -> Set J
@@ -592,46 +656,52 @@ instance HasCache c m => HasCache c (StepIndexT m) where
   putCache = StepIndexT . putCache
 
 (⊳) :: MonadFLAMIO m => FLAMIO a -> m a
-(⊳) x = liftFLAMIO (FLAMIO (local (first $ (+ 1)) (unFLAMIO x)))
+(⊳) x = liftFLAMIO (FLAMIO (local (first (+ 1)) (unFLAMIO x)))
 
-del :: (MonadFLAMIO m) => (Principal, Principal) -> m (QueryResult Principal)
+del :: (MonadFLAMIO m) => (Principal, Principal) -> m QueryResult
 del (p, q) = do
   h <- getState
   strat <- getStrategy
   clr <- getClearance
   idx <- liftFLAMIO $ FLAMIO $ asks fst
-  r <- anyM (\stratClr ->
-               let f lab = do
-                     l <- liftLIO getLabel
-                     b1 <- (⊳) (labelOf lab ⊔ l .⊑. clr) >>= lowerB idx
-                     b2 <- (⊳) (labelOf lab .⊑. stratClr) >>= lowerB idx
-                     case (b1, b2) of
-                       (True, True) -> Just <$> (⊳) (unlabel lab)
-                       _ -> return Nothing
-               in setFilterMapM f (unH h) >>= reach (p, q)) (unStrategy strat)
-  return $ liftB r
+  let run [] = return (False, Map.empty)
+      run (stratClr : strat) =
+        let f lab = do
+              l <- liftLIO getLabel
+              (b1, a1) <- (⊳) (labelOf lab ⊔ l .⊑. clr) >>= lowerB' idx
+              (b2, a2) <- (⊳) (labelOf lab .⊑. stratClr) >>= lowerB' idx
+              case (b1, b2) of
+                (True, True) -> Just <$> ((,) <$> (⊳) (unlabel lab) <*> pure (a1 `Map.union` a2))
+                _ -> return Nothing -- TODO: Should we record a1 and a2 here somehow?
+        in setFilterMapM f (unH h) >>= reach (p, q) >>= \case
+             (True, a) -> return (True, a)
+             (False, a) -> second (Map.union a) <$> run strat
+  uncurry (flip liftB) <$> run (unStrategy strat)
 
-löb :: MonadFLAMIO m => (Principal, Principal) -> m (QueryResult Principal)
+löb :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
 löb (p, q) = do
   (idx, assumptions) <- liftFLAMIO $ FLAMIO ask
   let assumptions' = Map.takeWhileAntitone (<= idx) assumptions
-  liftB <$> reach (p, q) (Set.fromAscList . Map.elems $ assumptions')
+  let x = Map.foldlWithKey' f Set.empty assumptions'
+  uncurry (flip liftB) <$> reach (p, q) x
+  where
+    f x idx = Set.foldr' (\(p, q) -> Set.insert ((p, q), Map.singleton idx (Set.singleton (p, q)))) x
 
-distrL :: MonadFLAMIO m => (Principal, Principal) -> m (QueryResult Principal)
+distrL :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
 distrL ((:→) (p1 :/\ p2), q) = ((p1 →) /\ (p2 →)) .≽. q
 distrL ((:→) (p1 :\/ p2), q) = ((p1 →) \/ (p2 →)) .≽. q
 distrL ((:←) (p1 :/\ p2), q) = ((p1 ←) /\ (p2 ←)) .≽. q
 distrL ((:←) (p1 :\/ p2), q) = ((p1 ←) \/ (p2 ←)) .≽. q
-distrL _ = return Failed
+distrL _ = return $ Failed Map.empty
 
-distrR :: MonadFLAMIO m => (Principal, Principal) -> m (QueryResult Principal)
+distrR :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
 distrR (p, (:→) (q1 :/\ q2)) = p .≽. ((q1 →) /\ (q2 →))
 distrR (p, (:→) (q1 :\/ q2)) = p .≽. ((q1 →) \/ (q2 →))
 distrR (p, (:←) (q1 :/\ q2)) = p .≽. ((q1 ←) /\ (q2 ←))
 distrR (p, (:←) (q1 :\/ q2)) = p .≽. ((q1 ←) \/ (q2 ←))
-distrR _ = return Failed
- 
-(.≽) :: MonadFLAMIO m => Principal -> Principal -> m (QueryResult Principal)
+distrR _ = return $ Failed Map.empty
+
+(.≽) :: MonadFLAMIO m => Principal -> Principal -> m QueryResult
 p .≽ q =
   löb (p, q) <|||>
   bot_ (p, q) <|||>
@@ -654,14 +724,14 @@ p ≽ q =
   runReaderT (unStepIndexT ((normalize (p %) .≽. normalize (q %)) >>= lowerB 0)) (0, Map.empty)
 
 instance SemiLattice Principal where
-  p ⊔ q = normalize (((p /\ q) →) /\ ((p \/ q) ←))
-  p ⊓ q = normalize (((p \/ q) →) /\ ((p /\ q) ←))
+  p .⊔. q = normalize (((p /\ q) →) /\ ((p \/ q) ←))
+  p .⊓. q = normalize (((p \/ q) →) /\ ((p /\ q) ←))
 
 instance Label H Principal where
   type C H Principal = MonadFLAMIO
   p ⊑ q = ((q →) /\ (p ←)) ≽ ((p →) /\ (q ←))
 
-(.⊑.) :: MonadFLAMIO m => Principal -> Principal -> m (QueryResult Principal)
+(.⊑.) :: MonadFLAMIO m => Principal -> Principal -> m QueryResult
 p .⊑. q = normalize ((q →) /\ (p ←)) .≽. normalize ((p →) /\ (q ←))
   
 mSingleton :: L -> M
@@ -892,43 +962,58 @@ a .: b = (a %) ::: (b %)
 
 type FLAM = Principal
 
+(⊥) :: Principal
+(⊥) = (:⊥)
+
+(⊤) :: Principal
+(⊤) = (:⊤)
+
 bot :: Principal
 bot = (:→) (:⊥) :/\ (:←) (:⊤)
 
 top :: Principal
 top = (:→) (:⊤) :/\ (:←) (:⊥)
   
-newtype FLAMIO a = FLAMIO { unFLAMIO :: StepIndexT (StateT (Cache Principal) (LIO H FLAM)) a }
+newtype FLAMIO a = FLAMIO { unFLAMIO :: StepIndexT (StateT Cache (LIO H FLAM)) a }
   deriving (Functor, Applicative, Monad)
 
 instance MonadLIO H FLAM FLAMIO where
   liftLIO = FLAMIO . liftLIO
 
-instance HasCache (Cache Principal) FLAMIO where
+instance HasCache Cache FLAMIO where
   getCache = FLAMIO get
   putCache c = FLAMIO $ put c
+
+(∇) :: (ToLabel a Principal) => a -> Principal
+(∇) a = normalize $ (confidentiality p' ←) /\ (integrity p' ←)
+  where p' = norm (a %)
   
 addDelegate :: (MonadFLAMIO m, ToLabel a Principal, ToLabel b Principal, ToLabel c Principal) =>
-               (a, b) -> c -> m ()
-addDelegate (p, q) l = do
-  h <- liftLIO getState
-  lab <- label l (normalize (p %), normalize (q %))
-  liftFLAMIO $ modifyCache $ prunedCache .~ Map.empty
-  liftLIO $ setState (H $ Set.insert lab (unH h))
+               a -> b -> c -> m ()
+addDelegate p q l = do
+  lbl <- getLabel
+  (,) <$> lbl ≽ (∇) q <*> (∇) (p →) ≽ (∇) (q →) >>= \case
+    (True, True) -> do
+      h <- liftLIO getState
+      lab <- label l (normalize (p %), normalize (q %))
+      liftFLAMIO $ modifyCache $ prunedCache .~ Map.empty
+      liftLIO $ setState (H $ Set.insert lab (unH h))
+    (False, _) -> error $ "IFC violation (addDelegate 1): " ++ show lbl ++ " ≽ " ++ show ((∇) q)
+    (_, False) -> error $ "IFC violation (addDelegate 2): " ++ show ((∇) (p →)) ++ " ≽ " ++ show ((∇) (q →))
 
 removeDelegate :: (MonadFLAMIO m, ToLabel a Principal, ToLabel b Principal, ToLabel c Principal) =>
-                  (a, b) -> c -> m ()
-removeDelegate (p, q) l = do
+                  a -> b -> c -> m ()
+removeDelegate p q l = do
   h <- liftLIO getState
   lab <- label l (normalize (p %), normalize (q %))
   liftFLAMIO $ modifyCache $ prunedCache .~ Map.empty
   liftLIO $ setState (H $ Set.delete lab (unH h))
 
-withStrategy :: (MonadFLAMIO m, ToLabel b Principal) => Strategy b -> m a -> m a
+withStrategy :: (MonadFLAMIO m, ToLabel b Principal) => [b] -> m a -> m a
 withStrategy newStrat m = do
   liftFLAMIO $ modifyCache $ prunedCache .~ Map.empty
   oldStrat <- liftLIO $ gets $ view _3
-  liftLIO $ modify $ (_3 .~ fmap (normalize . (%)) newStrat)
+  liftLIO $ modify $ (_3 .~ Strategy (fmap (normalize . (%)) newStrat))
   x <- m
   liftLIO $ modify $ (_3 .~ oldStrat)
   return x
@@ -950,51 +1035,81 @@ class Serializable a where
   maxSize :: a -> Int
   
 data LSocket a where
-  LSocket :: Serializable a => (Net.Socket, String) -> LSocket a
+  LSocket :: Serializable a => (Net.Socket, Principal) -> LSocket a
 type IP = String
 type Name = String
 type Port = String
-type Host = (IP, Port, Name)
+type Host a = (IP, Port, a)
 
-channelLabel :: LSocket a -> String
+channelLabel :: LSocket a -> Principal
 channelLabel (LSocket (_, s)) = s
   
-serve :: (MonadIO m, Serializable a, MonadMask m, MonadFLAMIO m) => Host -> (LSocket a -> m r) -> m ()
+serve :: (MonadIO m, Serializable a, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocket a -> m r) -> m ()
 serve (ip, port, name) f = do
-  Net.listen (Net.Host ip) port (\(socket, addr) -> Net.accept socket (\(socket', _) -> f (LSocket (socket', name))))
+  Net.listen (Net.Host ip) port (\(socket, addr) -> Net.accept socket (\(socket', _) -> f (LSocket (socket', (%) name))))
   return ()
   
-connect :: (MonadIO m, Serializable a, MonadMask m, MonadFLAMIO m) => Host -> (LSocket a -> m r) -> m ()
+connect :: (MonadIO m, Serializable a, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocket a -> m r) -> m ()
 connect (ip, port, name) f = do
-  Net.connect ip port (\(socket, _) -> f (LSocket (socket, name)))
+  Net.connect ip port (\(socket, _) -> f (LSocket (socket, (%) name)))
   return ()
 
 {- Q: Is it really bad to send to a principal above your clearance?
       If we did not have this, the battleship example could avoid adding the delegations
-   A: If we don't do this we cannot get a theorem equivalent to the LIO's Theorem 3 (Containment imposed by clearance)
+   A: If we don't do this we cannot get a theorem equivalent to the LIO's Theorem 3 (Containment imposed by clearance).
+      But we don't really care about this one.... I think
 -}
 send :: (MonadIO m, MonadMask m, MonadFLAMIO m, ToLabel c Principal) => LSocket a -> c -> a -> m ()
 send (LSocket (s, name)) me a = do
   lab <- liftLIO $ gets $ view _1
-  b <- (name %) ∈ lab
+  b <- view cur lab ⊑ name
   unless b $
     fail ("IFC violation (send): " ++
            show (view cur lab) ++
-           " ⊑ " ++ show (Name name) ++
-           " ⊑ " ++ show (view clearance lab))
+           " ⊑ " ++ show name)
   d <- label me a
   Net.send s (encode d)
 
-{- I would really like to have it return m (Labeled Principal (Maybe a)),
+{- TODO: I would really like to have it return m (Labeled Principal (Maybe a)),
    but when we receive Nothing we don't know how to label it -}
 recv :: forall m a . (MonadIO m, MonadMask m, MonadFLAMIO m) => LSocket a -> m (Maybe (Labeled Principal a))
-recv (LSocket (s, name)) =
+recv (LSocket (s, name)) = do
   Net.recv s (maxSize (undefined :: Labeled Principal a)) >>= \case
     Nothing -> return Nothing
     Just x -> do
       case decode x of
         Nothing -> return Nothing
         Just y -> return $ Just y
+
+recvDelegate :: (MonadIO m, MonadMask m, MonadFLAMIO m) => LSocket a -> m Bool
+recvDelegate (LSocket (s, name)) = do
+  Net.recv s (maxSize (undefined :: Labeled Principal (Principal, Principal))) >>= \case
+    Nothing -> return False
+    Just x -> do
+      case decode x of
+        Nothing -> return False
+        Just lab -> do
+          h <- liftLIO getState
+          liftFLAMIO $ modifyCache $ prunedCache .~ Map.empty
+          liftLIO $ setState (H $ Set.insert lab (unH h))
+          return True
+
+sendDelegate :: (MonadIO m, MonadMask m, MonadFLAMIO m, ToLabel b Principal, ToLabel c Principal, ToLabel d Principal) =>
+                LSocket a -> b -> c -> d -> m ()
+sendDelegate (LSocket (s, name)) p q r = do
+  lbl <- getLabel
+  (,) <$> lbl ≽ (∇) q <*> (∇) (p →) ≽ (∇) (q →) >>= \case
+    (True, True) -> do
+      lab <- label r (normalize (p %), normalize (q %))
+      bounds <- liftLIO $ gets $ view _1
+      b <- view cur bounds ⊑ name
+      unless b $
+        fail ("IFC violation (sendDelegate): " ++
+              show (view cur bounds) ++
+              " ⊑ " ++ show name)
+      Net.send s (encode lab)
+    (False, _) -> error $ "IFC violation (sendDelegate 1): " ++ show lbl ++ " ≽ " ++ show ((∇) q)
+    (_, False) -> error $ "IFC violation (sendDelegate 2): " ++ show ((∇) (p →)) ++ " ≽ " ++ show ((∇) (q →))
 
 instance MonadThrow m => MonadThrow (StepIndexT m) where
   throwM = StepIndexT . throwM

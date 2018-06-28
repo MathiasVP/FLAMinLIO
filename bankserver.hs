@@ -2,8 +2,9 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase #-}
 
-module BankServer where
+module Main where
 
+import System.IO
 import Lib.FLAM
 import Lib.LIO
 import qualified Data.Set as Set
@@ -120,16 +121,7 @@ await socket = do
   recv socket >>= \case
     Just lab -> do
       newScope $ do
-        addDelegate (("BankServer" →), (labelOf lab →)) bot
-        addDelegate ((labelOf lab ←), ("BankServer" ←)) bot
-        
-        addDelegate ((labelOf lab →), ("BankClient" →)) bot
-        addDelegate (("BankClient" ←), (labelOf lab ←)) bot
-        
-        addDelegate (("BankClient" →), (labelOf lab →)) bot
-        addDelegate (((labelOf lab) ←), ("BankClient" ←)) bot
-
-        unlabel lab >>= \case
+         unlabel lab >>= \case
           Left (StartSession u) -> do
             lbl <- getLabel
             clr <- getClearance
@@ -139,17 +131,78 @@ await socket = do
             liftLIO $ modify $ _1 . cur .~ lbl
             liftLIO $ modify $ _1 . clearance .~ clr
     Nothing -> await socket
-  
-    
+
+report :: String -> BankT FLAMIO ()
+report s = liftIO $ putStrLn s
+
 example :: BankT FLAMIO ()
 example = do
-  addDelegate (("BankClient" →), ("BankServer" →)) bot
-  addDelegate (("BankServer" ←), ("BankClient" ←)) bot
-  withStrategy (Strategy [bot]) $ do
-    serve ("127.0.0.1", "8000", "BankClient") await
+  liftIO $ hSetBuffering stdout NoBuffering
+  withStrategy [bot] $ do
+    report "1"
+    addDelegate ("BankClient" ←) ("BankServer" ←) bot
+    report "1"
+    serve ("127.0.0.1", "8000", ("BankClient" →) /\ ((⊥) ←)) $ \socket -> do
+      recvDelegate socket >>= \case
+        True -> do
+          report "2"
+          sendDelegate socket ("BankClient" →) ("BankServer" →) bot
+          report "2"
+          -- Now: BankClient ⊑ BankServer @ bot
+
+          recv socket >>= \case
+            Just lab -> do
+              report "3"
+              unlabel lab >>= \case
+                Left (StartSession u) -> do
+                  report "3"
+                  report "4"
+                  --addDelegate (u ←) ("BankServer" ←) "BankClient"
+                  report "4"
+                  report "5"
+                  recvDelegate socket >>= \case
+                    True -> do
+                      report "5"
+                      report "6"
+                      withStrategy [("BankClient" %) :: Principal] $ do
+                        -- Now: u ⊑ BankServer @ BankClient
+                        report "7"
+                        newScope $ do
+                          addDelegate (u ←) ("BankServer" ←) "BankClient"
+                          sendDelegate socket (u →) ("BankServer" →) "BankClient"
+                        report "7"
+                        report "8"
+                        recvDelegate socket >>= \case
+                          True -> do
+                            report "8"
+                            report "9"
+                            withStrategy [u] $ do
+                              addDelegate (u →) ("BankClient" →) ("BankClient" ⊔ u :: Principal)
+                              report "9"
+                              report "10"
+                              addDelegate ("BankClient" ←) (u ←) ("BankClient" ⊔ u :: Principal)
+                              report "10"
+                              -- Now: BankClient ⊑ u @ BankClient ⊔ u (So BankClient ⊑ u @ u)
+                              report "11"
+                              addDelegate ("BankClient" →) (u →) u
+                              send socket u (Right Ack)
+                              report "11"
+                              lbl <- getLabel
+                              clr <- getClearance
+                              liftLIO $ modify $ _1 . clearance .~ (u %)
+                              inSession socket
+                              liftLIO $ modify $ _1 . cur .~ lbl
+                              liftLIO $ modify $ _1 . clearance .~ clr
+                          False -> error "Error receiving delegation!"
+                          
+                    False -> error "Could not receive delegation!"
+            Nothing -> error "Error recv'ing!"
+          
+        False -> error "Could not receive delegation!"
+      await socket
   return ()
 
-runExample :: IO ()
-runExample =
+main :: IO ()
+main =
   evalStateT (unLIO (runFLAM (execBankT example Map.empty)))
   (BoundedLabel { _cur = bot, _clearance = ("BankServer" %) }, H Set.empty, noStrategy) >>= print

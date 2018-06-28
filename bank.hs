@@ -20,7 +20,7 @@ type Balance = Int
 type BankData = Map User (Labeled Principal (Map Account Balance))
 
 newtype BankT m a = BankT { runBankT :: StateT BankData m a }
-  deriving (Functor, Applicative, Monad, MonadState BankData)
+  deriving (Functor, Applicative, Monad, MonadState BankData, MonadTrans)
 
 instance MonadLIO s l m => MonadLIO s l (BankT m) where
   liftLIO = BankT . liftLIO

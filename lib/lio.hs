@@ -1,6 +1,8 @@
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE DeriveFoldable #-}
 {-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ExplicitForAll, ScopedTypeVariables #-}
@@ -17,20 +19,32 @@ import GHC.Exts(Constraint)
 import Algebra.PartialOrd
 import qualified Data.List as List
 
+class ToLabel a l where
+  (%) :: a -> l
+
+instance ToLabel l l where
+  (%) = id
+
 {- We need to seperate these two classes in order to call (⊔) and (⊔)
    without getting an ambiguity error since these two functions
    do not mention the state -}
 class SemiLattice l where
-  (⊔) :: l -> l -> l
-  (⊓) :: l -> l -> l
+  (.⊔.) :: l -> l -> l
+  (.⊓.) :: l -> l -> l
+
+(⊔) :: (SemiLattice l, ToLabel a l, ToLabel b l) => a -> b -> l
+a ⊔ b = (%) a .⊔. (%) b
+
+(⊓) :: (SemiLattice l, ToLabel a l, ToLabel b l) => a -> b -> l
+a ⊓ b = (%) a .⊓. (%) b
 
 data BoundedLabel l = BoundedLabel { _cur :: l, _clearance :: l }
   deriving (Eq, Ord, Show)
 
 makeLenses ''BoundedLabel
-
+  
 newtype Strategy l = Strategy { unStrategy :: [l] }
-  deriving (Eq, Ord, Functor, Traversable, Foldable)
+  deriving (Eq, Ord, Functor)
 
 instance Eq l => PartialOrd (Strategy l) where
   x `leq` y = unStrategy x `List.isPrefixOf` unStrategy y
@@ -64,12 +78,6 @@ class Monad m => HasCache c m | m -> c where
   getsCache f = do
     c <- getCache
     return $ f c
-
-class ToLabel a l where
-  (%) :: a -> l
-
-instance ToLabel l l where
-  (%) = id
   
 class (Show l, SemiLattice l) => Label s l where
   type C s l :: (* -> *) -> Constraint
@@ -109,15 +117,15 @@ data Labeled l a = Labeled { _labeledLab :: l, _labeledVal :: a }
 
 makeLenses ''Labeled
 
-raise :: (MonadLIO s l m, Label s l, C s l m) => String -> l -> m ()
+raise :: (SemiLattice l, MonadLIO s l m, Label s l, C s l m) => String -> l -> m ()
 raise msg l = do
   l' <- liftLIO $ gets $ view _1
-  b <- view cur l' ⊔ l ⊑ view clearance l'
+  b <- view cur l' .⊔. l ⊑ view clearance l'
   unless b $
     fail ("IFC violation (" ++ msg ++ "): " ++
            show (view cur l') ++ " ⊔ " ++ show l  ++
            " ⊑ " ++ show (view clearance l'))
-  liftLIO $ modify $ over (_1 . cur) (l ⊔)
+  liftLIO $ modify $ over (_1 . cur) (l .⊔.)
   
 (<&&>) :: (Monad m) => m Bool -> m Bool -> m Bool
 (<&&>) m1 m2 =
