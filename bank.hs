@@ -7,6 +7,7 @@ module Bank where
 
 import Lib.FLAM
 import Lib.LIO
+import Lib.Network
 import qualified Data.List as List
 import qualified Data.Map as Map
 import Data.Map(Map)

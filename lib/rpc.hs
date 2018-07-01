@@ -30,14 +30,7 @@ instance (Serializable a, RPCType r) => RPCType (a -> r) where
 
 instance Serializable a => RPCType (IO (Maybe a)) where
   rpc' (LSocketRPC (s, name)) f args = do
-    Net.send s (encode args)
+    Net.send s (encode (f, args))
     Net.recv s (maxSize (undefined :: a)) >>= \case
       Just bs -> return $ decode bs
       Nothing -> return Nothing
-
-example :: IO Int
-example = do
-  x <- rpc' (LSocketRPC (undefined, bot)) "foo" () () () () (42 :: Int, 1 :: Int)
-  case x of
-    Just n -> return n
-    Nothing -> return 42

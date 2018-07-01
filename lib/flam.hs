@@ -153,12 +153,12 @@ instance Show (ProgressCondition) where
   showsPrec _ FalseCondition = showString "False"
 
 type Assumptions = Set (Principal, Principal)
-newtype StepIndexT m a = StepIndexT { unStepIndexT :: ReaderT Assumptions m a }
+newtype AssumptionsT m a = AssumptionsT { unAssumptionsT :: ReaderT Assumptions m a }
   deriving (Functor, Applicative, Monad, MonadReader Assumptions)
 
-instance MonadState s m => MonadState s (StepIndexT m) where
-  get = StepIndexT get
-  put = StepIndexT . put
+instance MonadState s m => MonadState s (AssumptionsT m) where
+  get = AssumptionsT get
+  put = AssumptionsT . put
 
 instance (PartialOrd a, PartialOrd b, PartialOrd c) => PartialOrd (a, b, c) where
   (a1, b1, c1) `leq` (a2, b2, c2) = a1 `leq` a2 && b1 `leq` b2 && c1 `leq` c2
@@ -471,11 +471,11 @@ searchcache (cur, clr) (p, q) = do
     (_, _, Just (pc, a)) -> return $ Just $ PrunedResult pc a
     (_, _, _) -> return Nothing
 
-instance MonadLIO s l m => MonadLIO s l (StepIndexT m) where
+instance MonadLIO s l m => MonadLIO s l (AssumptionsT m) where
   liftLIO = lift . liftLIO
   
-instance MonadTrans StepIndexT where
-  lift = StepIndexT . lift 
+instance MonadTrans AssumptionsT where
+  lift = AssumptionsT . lift 
 
 (.≽.) :: MonadFLAMIO m => Principal -> Principal -> m QueryResult
 p .≽. q = do
@@ -635,9 +635,9 @@ instance HasCache c m => HasCache c (ReaderT r m) where
   getCache = ReaderT $ const getCache
   putCache = ReaderT . const . putCache
   
-instance HasCache c m => HasCache c (StepIndexT m) where
-  getCache = StepIndexT $ getCache
-  putCache = StepIndexT . putCache
+instance HasCache c m => HasCache c (AssumptionsT m) where
+  getCache = AssumptionsT $ getCache
+  putCache = AssumptionsT . putCache
 
 (⊳) :: MonadFLAMIO m => (Principal, Principal) -> FLAMIO a -> m a
 (p, q) ⊳ x = liftFLAMIO (FLAMIO (local (Set.insert (p, q)) (unFLAMIO x)))
@@ -704,7 +704,7 @@ p .≽ q =
   
 (≽) :: (MonadFLAMIO m, ToLabel a Principal, ToLabel b Principal) => a -> b -> m Bool
 p ≽ q =
-  runReaderT (unStepIndexT ((normalize (p %) .≽. normalize (q %)) >>= lowerB)) Set.empty
+  runReaderT (unAssumptionsT ((normalize (p %) .≽. normalize (q %)) >>= lowerB)) Set.empty
 infix 6 ≽
 
 instance SemiLattice Principal where
@@ -966,7 +966,7 @@ bot = (:→) (:⊥) :/\ (:←) (:⊤)
 top :: Principal
 top = (:→) (:⊤) :/\ (:←) (:⊥)
   
-newtype FLAMIO a = FLAMIO { unFLAMIO :: StepIndexT (StateT Cache (LIO H FLAM)) a }
+newtype FLAMIO a = FLAMIO { unFLAMIO :: AssumptionsT (StateT Cache (LIO H FLAM)) a }
   deriving (Functor, Applicative, Monad)
 
 instance MonadLIO H FLAM FLAMIO where
@@ -1021,7 +1021,7 @@ newScope m = do
   return x
 
 runFLAM :: FLAMIO a -> LIO H FLAM a
-runFLAM m = evalStateT (runReaderT (unStepIndexT $ unFLAMIO m) Set.empty) emptyCache
+runFLAM m = evalStateT (runReaderT (unAssumptionsT $ unFLAMIO m) Set.empty) emptyCache
 
 instance MonadFLAMIO FLAMIO where
   liftFLAMIO = id
@@ -1032,5 +1032,5 @@ instance MonadFLAMIO m => MonadFLAMIO (StateT s m) where
 instance MonadFLAMIO m => MonadFLAMIO (ReaderT r m) where
   liftFLAMIO = lift . liftFLAMIO
 
-instance MonadFLAMIO m => MonadFLAMIO (StepIndexT m) where
+instance MonadFLAMIO m => MonadFLAMIO (AssumptionsT m) where
   liftFLAMIO = lift . liftFLAMIO

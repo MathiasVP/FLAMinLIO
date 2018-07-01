@@ -63,23 +63,23 @@ connectRPC (ip, port, name) f = do
   Net.connect ip port (\(socket, _) -> f (LSocketRPC (socket, (%) name)))
   return ()
 
-instance MonadThrow m => MonadThrow (StepIndexT m) where
-  throwM = StepIndexT . throwM
+instance MonadThrow m => MonadThrow (AssumptionsT m) where
+  throwM = AssumptionsT . throwM
   
-instance MonadCatch m => MonadCatch (StepIndexT m) where
-  catch (StepIndexT m) f = StepIndexT $ catch m (unStepIndexT . f)
+instance MonadCatch m => MonadCatch (AssumptionsT m) where
+  catch (AssumptionsT m) f = AssumptionsT $ catch m (unAssumptionsT . f)
   
-instance MonadMask m => MonadMask (StepIndexT m) where
-  mask a = StepIndexT $ mask $ \u -> unStepIndexT (a $ q u)
-    where q u (StepIndexT b) = StepIndexT (u b)
+instance MonadMask m => MonadMask (AssumptionsT m) where
+  mask a = AssumptionsT $ mask $ \u -> unAssumptionsT (a $ q u)
+    where q u (AssumptionsT b) = AssumptionsT (u b)
 
-  uninterruptibleMask a = StepIndexT $ uninterruptibleMask $ \u -> unStepIndexT (a $ q u)
-    where q u (StepIndexT b) = StepIndexT (u b)
+  uninterruptibleMask a = AssumptionsT $ uninterruptibleMask $ \u -> unAssumptionsT (a $ q u)
+    where q u (AssumptionsT b) = AssumptionsT (u b)
 
-  generalBracket acquire release use = StepIndexT $ generalBracket
-    (unStepIndexT acquire)
-    (\resource exitCase -> unStepIndexT (release resource exitCase))
-    (\resource -> unStepIndexT (use resource))
+  generalBracket acquire release use = AssumptionsT $ generalBracket
+    (unAssumptionsT acquire)
+    (\resource exitCase -> unAssumptionsT (release resource exitCase))
+    (\resource -> unAssumptionsT (use resource))
   
 instance MonadThrow FLAMIO where
   throwM = FLAMIO . throwM
@@ -196,7 +196,7 @@ instance Serializable Principal where
 
 instance Serializable () where
   encode () = B.empty
-  decode = return $ Just ()
+  decode _ = Just ()
   maxSize _ = 0
   
 instance Serializable a => Serializable (Labeled FLAM a) where
@@ -204,8 +204,8 @@ instance Serializable a => Serializable (Labeled FLAM a) where
   decode bs = uncurry Labeled <$> decode bs
   maxSize _ = maxSize (undefined :: FLAM, undefined :: a)
 
-instance MonadIO m => MonadIO (StepIndexT m) where
-  liftIO = StepIndexT . liftIO
+instance MonadIO m => MonadIO (AssumptionsT m) where
+  liftIO = AssumptionsT . liftIO
 
 {- NOTE: This is a dangerous operation that should be put in a seperate (TCB) module! -}
 instance MonadIO FLAMIO where
