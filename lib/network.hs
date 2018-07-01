@@ -31,7 +31,7 @@ type Host a = (IP, Port, a)
 
 channelLabel :: LSocket a -> Principal
 channelLabel (LSocket (_, s)) = s
-  
+
 serve :: (MonadIO m, Serializable a, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocket a -> m r) -> m ()
 serve (ip, port, name) f = do
   Net.listen (Net.Host ip) port (\(socket, addr) -> Net.accept socket (\(socket', _) -> f (LSocket (socket', (%) name))))
@@ -44,12 +44,17 @@ connect (ip, port, name) f = do
 
 serveRPC :: (MonadIO m, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocketRPC -> m r) -> m ()
 serveRPC (ip, port, name) f = do
-  Net.listen (Net.Host ip) port (\(socket, addr) -> Net.accept socket (\(socket', _) -> f (LSocketRPC (socket', (%) name))))
+  Net.listen (Net.Host ip) port (\(socket, addr) ->
+    Net.accept socket (\(socket', _) ->
+      let lsocket = LSocketRPC (socket', (%) name)
+      in putSocketRPC lsocket >> f lsocket >> removeSocketRPC lsocket))
   return ()
   
 connectRPC :: (MonadIO m, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocketRPC -> m r) -> m ()
 connectRPC (ip, port, name) f = do
-  Net.connect ip port (\(socket, _) -> f (LSocketRPC (socket, (%) name)))
+  Net.connect ip port (\(socket, _) ->
+    let lsocket = LSocketRPC (socket, (%) name)
+    in putSocketRPC lsocket >> f lsocket >> removeSocketRPC lsocket)
   return ()
 
 instance MonadThrow m => MonadThrow (AssumptionsT m) where

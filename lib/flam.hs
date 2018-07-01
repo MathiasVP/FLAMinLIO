@@ -974,14 +974,21 @@ class Serializable a where
 data LSocket a where
   LSocket :: Serializable a => (Net.Socket, Principal) -> LSocket a
 
-data LSocketRPC where
-  LSocketRPC :: (Net.Socket, Principal) -> LSocketRPC
+newtype LSocketRPC = LSocketRPC (Net.Socket, Principal)
+  deriving Eq
 
-data FLAMIOSt = FLAMIOSt { _cache :: Cache, _sockets :: Set LSocketRPC }
+data FLAMIOSt = FLAMIOSt { _cache :: Cache, _sockets :: [LSocketRPC] }
 
 makeLenses ''FLAMIOSt
- 
 
+putSocketRPC :: MonadFLAMIO m => LSocketRPC -> m ()
+putSocketRPC s =
+  liftFLAMIO $ FLAMIO $ modify $ over sockets $ (:) s
+
+removeSocketRPC :: MonadFLAMIO m => LSocketRPC -> m ()
+removeSocketRPC s =
+  liftFLAMIO $ FLAMIO $ modify $ over sockets $ List.delete s
+  
 instance MonadLIO H FLAM FLAMIO where
   liftLIO = FLAMIO . liftLIO
 
@@ -1035,7 +1042,7 @@ newScope m = do
 
 runFLAM :: FLAMIO a -> LIO H FLAM a
 runFLAM m = evalStateT (runReaderT (unAssumptionsT $ unFLAMIO m) Set.empty)
-            (FLAMIOSt emptyCache Set.empty)
+            (FLAMIOSt emptyCache [])
 
 instance MonadFLAMIO FLAMIO where
   liftFLAMIO = id
