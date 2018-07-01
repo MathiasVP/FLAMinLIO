@@ -8,7 +8,6 @@
 {-# LANGUAGE GADTs #-}
 module Lib.RPC where
 
-import Lib.FLAM
 import Lib.LIO
 import Lib.Network
 import Control.Monad.IO.Class

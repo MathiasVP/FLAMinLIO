@@ -40,11 +40,8 @@ import Data.POMap.Strict(POMap)
 import Algebra.PartialOrd
 import Algebra.Lattice.Op
 import Data.Foldable
-
 import Data.Proxy
 
-{- For networking -}
-import Control.Monad.Catch
 import qualified Data.Binary as Bin
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
@@ -215,6 +212,12 @@ Pruned pc a1 ^ a2 = Pruned pc (Set.union a1 a2)
 liftB :: Assumptions -> Bool -> QueryResult
 liftB a True = Success a
 liftB a False = Failed a
+
+class (MonadLIO H Principal m) => MonadFLAMIO m where
+  liftFLAMIO :: FLAMIO a -> m a
+
+newtype FLAMIO a = FLAMIO { unFLAMIO :: AssumptionsT (StateT FLAMIOSt (LIO H FLAM)) a }
+  deriving (Functor, Applicative, Monad)
 
 lowerB' :: MonadFLAMIO m => QueryResult -> m (Bool, Assumptions)
 lowerB' (Success a) = return (True, a)
@@ -624,9 +627,6 @@ transitive s
               ps <- sequence [Set.toList bs | M bs <- Set.toList ms]]
   where mkM = M . Set.singleton
 
-class (MonadLIO H Principal m) => MonadFLAMIO m where
-  liftFLAMIO :: FLAMIO a -> m a
-
 instance HasCache c m => HasCache c (StateT s m) where
   getCache = StateT $ \s -> (,) <$> getCache <*> pure s
   putCache c = StateT $ \s -> (,) <$> putCache c <*> pure s
@@ -965,16 +965,29 @@ bot = (:→) (:⊥) :/\ (:←) (:⊤)
 
 top :: Principal
 top = (:→) (:⊤) :/\ (:←) (:⊥)
-  
-newtype FLAMIO a = FLAMIO { unFLAMIO :: AssumptionsT (StateT Cache (LIO H FLAM)) a }
-  deriving (Functor, Applicative, Monad)
+
+class Serializable a where
+  encode :: a -> B.ByteString
+  decode :: B.ByteString -> Maybe a
+  maxSize :: a -> Int
+
+data LSocket a where
+  LSocket :: Serializable a => (Net.Socket, Principal) -> LSocket a
+
+data LSocketRPC where
+  LSocketRPC :: (Net.Socket, Principal) -> LSocketRPC
+
+data FLAMIOSt = FLAMIOSt { _cache :: Cache, _sockets :: Set LSocketRPC }
+
+makeLenses ''FLAMIOSt
+ 
 
 instance MonadLIO H FLAM FLAMIO where
   liftLIO = FLAMIO . liftLIO
 
 instance HasCache Cache FLAMIO where
-  getCache = FLAMIO get
-  putCache c = FLAMIO $ put c
+  getCache = FLAMIO $ gets (view cache)
+  putCache c = FLAMIO $ modify $ cache .~ c
 
 (∇) :: (ToLabel a Principal) => a -> Principal
 (∇) a = normalize $ (confidentiality p' ←) /\ (integrity p' ←)
@@ -1021,7 +1034,8 @@ newScope m = do
   return x
 
 runFLAM :: FLAMIO a -> LIO H FLAM a
-runFLAM m = evalStateT (runReaderT (unAssumptionsT $ unFLAMIO m) Set.empty) emptyCache
+runFLAM m = evalStateT (runReaderT (unAssumptionsT $ unFLAMIO m) Set.empty)
+            (FLAMIOSt emptyCache Set.empty)
 
 instance MonadFLAMIO FLAMIO where
   liftFLAMIO = id

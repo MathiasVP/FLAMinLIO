@@ -24,17 +24,6 @@ import qualified Network.Simple.TCP as Net
 import Control.Lens.Tuple
 import Control.Lens hiding ((:<))
 
-class Serializable a where
-  encode :: a -> B.ByteString
-  decode :: B.ByteString -> Maybe a
-  maxSize :: a -> Int
-
-data LSocket a where
-  LSocket :: Serializable a => (Net.Socket, Principal) -> LSocket a
-
-data LSocketRPC where
-  LSocketRPC :: (Net.Socket, Principal) -> LSocketRPC
-
 type IP = String
 type Name = String
 type Port = String
