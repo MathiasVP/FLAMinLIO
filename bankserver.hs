@@ -149,7 +149,6 @@ example = do
           sendDelegate socket ("BankClient" →) ("BankServer" →) bot
           report "2"
           -- Now: BankClient ⊑ BankServer @ bot
-
           recv socket >>= \case
             Just lab -> do
               report "3"
@@ -172,6 +171,7 @@ example = do
                           sendDelegate socket (u →) ("BankServer" →) "BankClient"
                         report "7"
                         report "8"
+                        sendDelegate socket ("BankClient" ←) ("BankServer" ←) "BankClient"
                         recvDelegate socket >>= \case
                           True -> do
                             report "8"
