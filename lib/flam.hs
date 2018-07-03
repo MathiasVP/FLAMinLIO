@@ -41,11 +41,10 @@ import Algebra.PartialOrd
 import Algebra.Lattice.Op
 import Data.Foldable
 import Data.Typeable
+import Lib.Serializable
+import Control.Concurrent
 
-import qualified Data.Binary as Bin
 import qualified Data.ByteString as B
-import qualified Data.ByteString.Lazy as BL
-import qualified Data.ByteString.Char8 as B8
 import qualified Network.Simple.TCP as Net
 
 listview :: Ord a => Set a -> [a]
@@ -684,6 +683,54 @@ distrR (p, (:←) (q1 :/\ q2)) = p .≽. ((q1 ←) /\ (q2 ←))
 distrR (p, (:←) (q1 :\/ q2)) = p .≽. ((q1 ←) \/ (q2 ←))
 distrR _ = return $ Failed Set.empty
 
+instance Serializable Principal where
+  encode (:⊤) = B.singleton 0
+  encode (:⊥) = B.singleton 1
+  encode (Name s) = B.cons 2 (encode s)
+  encode (p1 :/\ p2) = B.cons 3 (encode (p1, p2))
+  encode (p1 :\/ p2) = B.cons 4 (encode (p1, p2))
+  encode ((:→) p) = B.cons 5 (encode p)
+  encode ((:←) p) = B.cons 6 (encode p)
+  encode (p1 ::: p2) = B.cons 7 (encode (p1, p2))
+
+  decode' bs =
+    case B.uncons bs of
+      Just (0, bs') -> Just ((:⊤), bs')
+      Just (1, bs') -> Just ((:⊥), bs')
+      Just (2, bs') -> Name </> decode' bs'
+      Just (3, bs') -> uncurry (:/\) </> decode' bs'
+      Just (4, bs') -> uncurry (:\/) </> decode' bs'
+      Just (5, bs') -> (:→) </> decode' bs'
+      Just (6, bs') -> (:←) </> decode' bs'
+      Just (7, bs') -> uncurry (:::) </> decode' bs'
+      _ -> Nothing
+
+  maxSize _ = 1024
+
+instance Serializable a => Serializable (Labeled Principal a) where
+  encode (Labeled l a) = encode (l, a)
+  decode' bs = uncurry Labeled </> decode' bs
+  maxSize _ = maxSize (undefined :: FLAM, undefined :: a)
+
+forward :: forall m . MonadFLAMIO m => (Principal, Principal) -> m QueryResult
+forward (p, q) = do
+  l <- getLabel
+  (ns, a) <- runWriterT (lift getSocketsRPC >>=
+                    filterM (\(LSocketRPC (_, n)) ->
+                                lift (n .≽. l >>= lowerB') >>= \case
+                                  (True, a) -> tell a >> return True
+                                  (False, a) -> tell a >> return False
+                            ))
+  run ns
+  where
+    run :: [LSocketRPC] -> m QueryResult
+    run [] = return $ Failed Set.empty
+    run (LSocketRPC (s, n) : ns) = do
+      liftFLAMIO $ liftLIO $ liftIO $ Net.send s (encode (p, q))
+      (>>= decode) <$> (liftFLAMIO $ liftLIO $ liftIO $ Net.recv s (maxSize (undefined :: Bool))) >>= \case
+        Just True -> return $ Success $ Set.empty
+        Nothing -> run ns
+        
 (.≽) :: MonadFLAMIO m => Principal -> Principal -> m QueryResult
 p .≽ q =
   löb (p, q) <|||>
@@ -691,6 +738,7 @@ p .≽ q =
   top_ (p, q) <|||>
   refl (p, q) <|||>
   del (p, q) <|||>
+  forward (p, q) <|||>
   distrL (p, q) <|||>
   distrR (p, q) <|||>
   proj (p, q) <|||>
@@ -966,21 +1014,6 @@ bot = (:→) (:⊥) :/\ (:←) (:⊤)
 top :: Principal
 top = (:→) (:⊤) :/\ (:←) (:⊥)
 
-class Serializable a where
-  encode :: a -> B.ByteString
-  decode' :: B.ByteString -> Maybe (a, B.ByteString)
-  decode :: B.ByteString -> Maybe a
-  decode bs =
-    case decode' bs of
-      Just (a, bs) | bs == B.empty -> Just a
-      _ -> Nothing
-  maxSize :: a -> Int
-
-data SerializableExt = forall t . (Serializable t, Typeable t, Show t) => SerializableExt t
-
-instance Show SerializableExt where
-  show (SerializableExt x) = "SerializableExt (" ++ show x ++ ")"
-
 data LSocket a where
   LSocket :: Serializable a => (Net.Socket, Principal) -> LSocket a
 
@@ -994,13 +1027,38 @@ class Typeable f => Curryable f where
   
 data RPCInvokableExt = forall t a b . (RPCInvokable t, Typeable t, Curryable t) => RPCInvokableExt t
 
-data FLAMIOSt = FLAMIOSt { _cache :: Cache, _sockets :: [LSocketRPC], _exports :: Map String RPCInvokableExt }
+data FLAMIOSt = FLAMIOSt { _cache :: Cache, _sockets :: [LSocketRPC], _exports :: Map String RPCInvokableExt, _hPtr :: MVar H }
 
-makeLenses ''FLAMIOSt
+cache :: Lens' FLAMIOSt Cache
+cache = lens _cache (\st c -> st { _cache = c })
+
+sockets :: Lens' FLAMIOSt [LSocketRPC]
+sockets = lens _sockets (\st s -> st { _sockets = s })
+
+exports :: Lens' FLAMIOSt (Map String RPCInvokableExt)
+exports = lens _exports (\st e -> st { _exports = e })
+
+hPtr :: Lens' FLAMIOSt (MVar H)
+hPtr = lens _hPtr (\st h -> st { _hPtr = h })
+
+insertInHPtr :: MonadFLAMIO m => Labeled Principal (Principal, Principal) -> m ()
+insertInHPtr lab = do
+  h <- getHPtr
+  liftFLAMIO $ liftLIO $ liftIO $ modifyMVar_ h (return . H . Set.insert lab . unH)
+  return ()
+
+removeFromHPtr :: MonadFLAMIO m => Labeled Principal (Principal, Principal) -> m ()
+removeFromHPtr lab = do
+  h <- getHPtr
+  liftFLAMIO $ liftLIO $ liftIO $ modifyMVar_ h (return . H . Set.delete lab . unH)
+  return ()
 
 putSocketRPC :: MonadFLAMIO m => LSocketRPC -> m ()
 putSocketRPC s =
   liftFLAMIO $ FLAMIO $ modify $ over sockets $ (:) s
+
+getSocketsRPC :: MonadFLAMIO m => m [LSocketRPC]
+getSocketsRPC = liftFLAMIO $ FLAMIO $ gets (view sockets)
 
 removeSocketRPC :: MonadFLAMIO m => LSocketRPC -> m ()
 removeSocketRPC s =
@@ -1012,6 +1070,9 @@ export s f = liftFLAMIO $ FLAMIO $ modify $ over exports $
 
 lookupRPC :: MonadFLAMIO m => String -> m (Maybe RPCInvokableExt)
 lookupRPC s = Map.lookup s <$> liftFLAMIO (FLAMIO (gets (view exports)))
+
+getHPtr :: MonadFLAMIO m => m (MVar H)
+getHPtr = liftFLAMIO $ FLAMIO $ gets (view hPtr)
 
 instance MonadLIO H FLAM FLAMIO where
   liftLIO = FLAMIO . liftLIO
@@ -1034,6 +1095,7 @@ addDelegate p q l = do
       lab <- label l (normalize (p %), normalize (q %))
       liftFLAMIO $ modifyCache $ prunedCache .~ Map.empty
       liftLIO $ setState (H $ Set.insert lab (unH h))
+      insertInHPtr lab
     (False, _) -> error $ "IFC violation (addDelegate 1): " ++ show lbl ++ " ≽ " ++ show ((∇) q)
     (_, False) -> error $ "IFC violation (addDelegate 2): " ++ show ((∇) (p →)) ++ " ≽ " ++ show ((∇) (q →))
 
@@ -1044,6 +1106,7 @@ removeDelegate p q l = do
   lab <- label l (normalize (p %), normalize (q %))
   liftFLAMIO $ modifyCache $ prunedCache .~ Map.empty
   liftLIO $ setState (H $ Set.delete lab (unH h))
+  removeFromHPtr lab
 
 withStrategy :: (MonadFLAMIO m, ToLabel b Principal) => [b] -> m a -> m a
 withStrategy newStrat m = do
@@ -1065,8 +1128,13 @@ newScope m = do
   return x
 
 runFLAM :: FLAMIO a -> StateT (BoundedLabel FLAM, H, Strategy FLAM) IO a
-runFLAM m = unLIO $ evalStateT (runReaderT (unAssumptionsT $ unFLAMIO m) Set.empty)
-                      (FLAMIOSt emptyCache [] Map.empty)
+runFLAM m = do
+  h <- liftIO $ newMVar (H Set.empty)
+  liftIO $ forkIO (waitForForwards h)
+  unLIO $ evalStateT (runReaderT (unAssumptionsT $ unFLAMIO m) Set.empty)
+    (FLAMIOSt emptyCache [] Map.empty h)
+  where waitForForwards :: MVar H -> IO ()
+        waitForForwards _ = return ()
 
 instance MonadFLAMIO FLAMIO where
   liftFLAMIO = id
