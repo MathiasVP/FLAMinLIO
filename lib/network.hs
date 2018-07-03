@@ -23,6 +23,7 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Char8 as B8
 import qualified Network.Simple.TCP as Net
 import Control.Lens.Tuple
+import Data.Tuple.Only
 import Control.Lens hiding ((:<))
 import Data.Typeable
 
@@ -159,6 +160,12 @@ instance (Serializable a, Serializable b, Serializable c) => Serializable (a, b,
 (</>) :: Functor f => (a -> b) -> f (a, c) -> f (b, c)
 f </> p = fmap (\(a, c) -> (f a, c)) p
 
+instance Serializable a => Serializable (Only a) where
+  encode (Only a) = encode a
+  decode' bs = Only </> decode' bs
+
+  maxSize _ = maxSize (undefined :: a)
+
 instance (Serializable a, Serializable b) => Serializable (Either a b) where
   encode (Left a) = B.cons 0 (encode a)
   encode (Right b) = B.cons 1 (encode b)
@@ -229,7 +236,7 @@ instance Serializable a => Serializable (Maybe a) where
 instance Serializable a => Serializable (Labeled FLAM a) where
   encode (Labeled l a) = encode (l, a)
   decode' bs = uncurry Labeled </> decode' bs
-  maxSize _ = maxSize (undefined :: FLAM, undefined :: a)
+  maxSize _ = maxSize (undefined :: FLAM, undefined :: a)  
 
 instance MonadIO m => MonadIO (AssumptionsT m) where
   liftIO = AssumptionsT . liftIO

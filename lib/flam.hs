@@ -989,7 +989,10 @@ newtype LSocketRPC = LSocketRPC (Net.Socket, Principal)
 
 class RPCInvokable t
 
-data RPCInvokableExt = forall t . (RPCInvokable t, Typeable t) => RPCInvokableExt t
+class Typeable f => Curryable f where
+  c :: (Typeable a, Typeable b) => f -> a -> Maybe b
+  
+data RPCInvokableExt = forall t a b . (RPCInvokable t, Typeable t, Curryable t) => RPCInvokableExt t
 
 data FLAMIOSt = FLAMIOSt { _cache :: Cache, _sockets :: [LSocketRPC], _exports :: Map String RPCInvokableExt }
 
@@ -1003,7 +1006,7 @@ removeSocketRPC :: MonadFLAMIO m => LSocketRPC -> m ()
 removeSocketRPC s =
   liftFLAMIO $ FLAMIO $ modify $ over sockets $ List.delete s
 
-export :: (MonadFLAMIO m, RPCInvokable t, Typeable t) => String -> t -> m ()
+export :: (MonadFLAMIO m, RPCInvokable t, Typeable t, Curryable t) => String -> t -> m ()
 export s f = liftFLAMIO $ FLAMIO $ modify $ over exports $
                Map.insert s (RPCInvokableExt f)
 
