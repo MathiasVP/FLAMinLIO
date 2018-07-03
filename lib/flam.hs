@@ -40,7 +40,7 @@ import Data.POMap.Strict(POMap)
 import Algebra.PartialOrd
 import Algebra.Lattice.Op
 import Data.Foldable
-import Data.Proxy
+import Data.Typeable
 
 import qualified Data.Binary as Bin
 import qualified Data.ByteString as B
@@ -968,8 +968,18 @@ top = (:→) (:⊤) :/\ (:←) (:⊥)
 
 class Serializable a where
   encode :: a -> B.ByteString
+  decode' :: B.ByteString -> Maybe (a, B.ByteString)
   decode :: B.ByteString -> Maybe a
+  decode bs =
+    case decode' bs of
+      Just (a, bs) | bs == B.empty -> Just a
+      _ -> Nothing
   maxSize :: a -> Int
+
+data SerializableExt = forall t . (Serializable t, Typeable t, Show t) => SerializableExt t
+
+instance Show SerializableExt where
+  show (SerializableExt x) = "SerializableExt (" ++ show x ++ ")"
 
 data LSocket a where
   LSocket :: Serializable a => (Net.Socket, Principal) -> LSocket a
@@ -977,7 +987,11 @@ data LSocket a where
 newtype LSocketRPC = LSocketRPC (Net.Socket, Principal)
   deriving Eq
 
-data FLAMIOSt = FLAMIOSt { _cache :: Cache, _sockets :: [LSocketRPC] }
+class RPCInvokable t
+
+data RPCInvokableExt = forall t . (RPCInvokable t, Typeable t) => RPCInvokableExt t
+
+data FLAMIOSt = FLAMIOSt { _cache :: Cache, _sockets :: [LSocketRPC], _exports :: Map String RPCInvokableExt }
 
 makeLenses ''FLAMIOSt
 
@@ -988,7 +1002,14 @@ putSocketRPC s =
 removeSocketRPC :: MonadFLAMIO m => LSocketRPC -> m ()
 removeSocketRPC s =
   liftFLAMIO $ FLAMIO $ modify $ over sockets $ List.delete s
-  
+
+export :: (MonadFLAMIO m, RPCInvokable t, Typeable t) => String -> t -> m ()
+export s f = liftFLAMIO $ FLAMIO $ modify $ over exports $
+               Map.insert s (RPCInvokableExt f)
+
+lookupRPC :: MonadFLAMIO m => String -> m (Maybe RPCInvokableExt)
+lookupRPC s = Map.lookup s <$> liftFLAMIO (FLAMIO (gets (view exports)))
+
 instance MonadLIO H FLAM FLAMIO where
   liftLIO = FLAMIO . liftLIO
 
@@ -1040,9 +1061,9 @@ newScope m = do
   liftLIO $ setState h
   return x
 
-runFLAM :: FLAMIO a -> LIO H FLAM a
-runFLAM m = evalStateT (runReaderT (unAssumptionsT $ unFLAMIO m) Set.empty)
-            (FLAMIOSt emptyCache [])
+runFLAM :: FLAMIO a -> StateT (BoundedLabel FLAM, H, Strategy FLAM) IO a
+runFLAM m = unLIO $ evalStateT (runReaderT (unAssumptionsT $ unFLAMIO m) Set.empty)
+                      (FLAMIOSt emptyCache [] Map.empty)
 
 instance MonadFLAMIO FLAMIO where
   liftFLAMIO = id
