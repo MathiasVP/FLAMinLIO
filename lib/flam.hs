@@ -712,6 +712,11 @@ instance Serializable a => Serializable (Labeled Principal a) where
   decode' bs = uncurry Labeled </> decode' bs
   maxSize _ = maxSize (undefined :: FLAM, undefined :: a)
 
+instance Serializable l => Serializable (Strategy l) where
+  encode (Strategy ls) = encode ls
+  decode' bs = Strategy </> decode' bs
+  maxSize _ = 1024
+  
 forward :: forall m . MonadFLAMIO m => (Principal, Principal) -> m QueryResult
 forward (p, q) = do
   l <- getLabel
@@ -719,18 +724,23 @@ forward (p, q) = do
                     filterM (\(LSocketRPC (_, n)) ->
                                 lift (n .≽. l >>= lowerB') >>= \case
                                   (True, a) -> tell a >> return True
-                                  (False, a) -> tell a >> return False
-                            ))
-  run ns
+                                  (False, a) -> tell a >> return False))
+  (^ a) <$> run ns
   where
     run :: [LSocketRPC] -> m QueryResult
     run [] = return $ Failed Set.empty
     run (LSocketRPC (s, n) : ns) = do
-      liftFLAMIO $ liftLIO $ liftIO $ Net.send s (encode (p, q))
-      (>>= decode) <$> (liftFLAMIO $ liftLIO $ liftIO $ Net.recv s (maxSize (undefined :: Bool))) >>= \case
-        Just True -> return $ Success $ Set.empty
+      strat <- getStrategy
+      liftFLAMIO $ liftLIO $ liftIO $ Net.send s (encode (p, q, strat))
+      liftFLAMIO (liftLIO $ liftIO $ Net.recv s (maxSize (undefined :: Bool))) >>= \case
+        Just bs -> do
+          --liftFLAMIO $ liftLIO $ liftIO $ print bs
+          case decode bs of
+            Just True -> return $ Success $ Set.empty
+            _ -> run ns
+            
         Nothing -> run ns
-        
+
 (.≽) :: MonadFLAMIO m => Principal -> Principal -> m QueryResult
 p .≽ q =
   löb (p, q) <|||>
@@ -738,7 +748,6 @@ p .≽ q =
   top_ (p, q) <|||>
   refl (p, q) <|||>
   del (p, q) <|||>
-  forward (p, q) <|||>
   distrL (p, q) <|||>
   distrR (p, q) <|||>
   proj (p, q) <|||>
@@ -748,7 +757,8 @@ p .≽ q =
   conjR (p, q) <|||>
   disjL (p, q) <|||>
   disjR (p, q) <|||>
-  conjL (p, q)
+  conjL (p, q) <|||>
+  forward (p, q)
   
 (≽) :: (MonadFLAMIO m, ToLabel a Principal, ToLabel b Principal) => a -> b -> m Bool
 p ≽ q =
@@ -1027,7 +1037,10 @@ class Typeable f => Curryable f where
   
 data RPCInvokableExt = forall t a b . (RPCInvokable t, Typeable t, Curryable t) => RPCInvokableExt t
 
-data FLAMIOSt = FLAMIOSt { _cache :: Cache, _sockets :: [LSocketRPC], _exports :: Map String RPCInvokableExt, _hPtr :: MVar H }
+data FLAMIOSt = FLAMIOSt { _cache :: Cache,
+                           _sockets :: [LSocketRPC],
+                           _exports :: Map String RPCInvokableExt,
+                           _hPtr :: MVar H }
 
 cache :: Lens' FLAMIOSt Cache
 cache = lens _cache (\st c -> st { _cache = c })
@@ -1130,11 +1143,8 @@ newScope m = do
 runFLAM :: FLAMIO a -> StateT (BoundedLabel FLAM, H, Strategy FLAM) IO a
 runFLAM m = do
   h <- liftIO $ newMVar (H Set.empty)
-  liftIO $ forkIO (waitForForwards h)
   unLIO $ evalStateT (runReaderT (unAssumptionsT $ unFLAMIO m) Set.empty)
     (FLAMIOSt emptyCache [] Map.empty h)
-  where waitForForwards :: MVar H -> IO ()
-        waitForForwards _ = return ()
 
 instance MonadFLAMIO FLAMIO where
   liftFLAMIO = id

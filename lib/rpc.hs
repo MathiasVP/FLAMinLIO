@@ -14,6 +14,7 @@ module Lib.RPC where
 import Lib.LIO
 import Lib.FLAM
 import Lib.Network
+import Lib.Serializable
 import Control.Monad.IO.Class
 import Control.Monad.State
 import Control.Monad.Catch

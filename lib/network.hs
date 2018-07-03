@@ -10,6 +10,7 @@ module Lib.Network where
 
 import Lib.FLAM
 import Lib.LIO
+import Lib.Serializable
 import qualified Data.List as List
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -25,6 +26,7 @@ import qualified Network.Simple.TCP as Net
 import Control.Lens.Tuple
 import Data.Tuple.Only
 import Control.Lens hiding ((:<))
+import Control.Concurrent
 import Data.Typeable
 
 type IP = String
@@ -45,20 +47,53 @@ connect (ip, port, name) f = do
   Net.connect ip port (\(socket, _) -> f (LSocket (socket, (%) name)))
   return ()
 
+waitForQuery :: Net.Socket -> Principal -> Principal -> MVar H -> IO ()
+waitForQuery s lbl clr mvar = do
+  catch (do
+    h <- readMVar mvar
+    Net.recv s (maxSize (undefined :: (Principal, Principal, Strategy Principal))) >>= \case
+      Just bs -> do
+        case decode bs of
+          Just (p :: Principal, q :: Principal, strat :: Strategy Principal) -> do
+            (b, (BoundedLabel lbl' clr', _, strat')) <- runStateT (runFLAM (p ≽ q)) (BoundedLabel lbl clr, h, strat)
+            --print (b, encode b)
+            Net.send s (encode b)
+            waitForQuery s lbl' clr' mvar
+          Nothing -> do
+            Net.send s (encode False)
+            waitForQuery s lbl clr mvar
+      Nothing -> do
+        Net.send s (encode False)
+        waitForQuery s lbl clr mvar)
+    (\(e :: SomeException) -> return ())
+
 serveRPC :: (MonadIO m, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocketRPC -> m r) -> m ()
 serveRPC (ip, port, name) f = do
   Net.listen (Net.Host ip) port (\(socket, addr) ->
     Net.accept socket (\(socket', _) ->
       let lsocket = LSocketRPC (socket', (%) name)
-      in putSocketRPC lsocket >> f lsocket >> removeSocketRPC lsocket))
-  return ()
-  
+      in do putSocketRPC lsocket
+            h <- liftFLAMIO $ getHPtr
+            lbl <- getLabel
+            clr <- getClearance
+            tid <- liftFLAMIO $ liftLIO $ liftIO $ forkIO (waitForQuery socket' lbl clr h)
+            f lsocket
+            liftFLAMIO $ liftLIO $ liftIO $ killThread tid
+            removeSocketRPC lsocket))
+            
 connectRPC :: (MonadIO m, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocketRPC -> m r) -> m ()
 connectRPC (ip, port, name) f = do
   Net.connect ip port (\(socket, _) ->
     let lsocket = LSocketRPC (socket, (%) name)
-    in putSocketRPC lsocket >> f lsocket >> removeSocketRPC lsocket)
-  return ()
+    in do
+      putSocketRPC lsocket
+      h <- liftFLAMIO $ getHPtr
+      lbl <- getLabel
+      clr <- getClearance
+      tid <- liftFLAMIO $ liftLIO $ liftIO $ forkIO (waitForQuery socket lbl clr h)
+      f lsocket
+      liftFLAMIO $ liftLIO $ liftIO $ killThread tid
+      removeSocketRPC lsocket)
 
 instance MonadThrow m => MonadThrow (AssumptionsT m) where
   throwM = AssumptionsT . throwM
