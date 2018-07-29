@@ -10,7 +10,6 @@ module Lib.Network where
 
 import Lib.FLAM
 import Lib.LIO
-import Lib.Serializable
 import qualified Data.List as List
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -28,6 +27,7 @@ import Data.Tuple.Only
 import Control.Lens hiding ((:<))
 import Control.Concurrent
 import Data.Typeable
+import Data.Binary
 
 type IP = String
 type Name = String
@@ -37,12 +37,12 @@ type Host a = (IP, Port, a)
 channelLabel :: LSocket a -> Principal
 channelLabel (LSocket (_, s)) = s
 
-serve :: (MonadIO m, Serializable a, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocket a -> m r) -> m ()
+serve :: (MonadIO m, Binary a, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocket a -> m r) -> m ()
 serve (ip, port, name) f = do
   Net.listen (Net.Host ip) port (\(socket, addr) -> Net.accept socket (\(socket', _) -> f (LSocket (socket', (%) name))))
   return ()
   
-connect :: (MonadIO m, Serializable a, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocket a -> m r) -> m ()
+connect :: (MonadIO m, Binary a, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocket a -> m r) -> m ()
 connect (ip, port, name) f = do
   Net.connect ip port (\(socket, _) -> f (LSocket (socket, (%) name)))
   return ()
@@ -51,19 +51,18 @@ waitForQuery :: Net.Socket -> Principal -> Principal -> MVar H -> IO ()
 waitForQuery s lbl clr mvar = do
   catch (do
     h <- readMVar mvar
-    Net.recv s (maxSize (undefined :: (Principal, Principal, Strategy Principal))) >>= \case
+    Net.recv s 1024 >>= \case
       Just bs -> do
-        case decode bs of
+        case decode (BL.fromStrict bs) of
           Just (p :: Principal, q :: Principal, strat :: Strategy Principal) -> do
             (b, (BoundedLabel lbl' clr', _, strat')) <- runStateT (runFLAM (p ≽ q)) (BoundedLabel lbl clr, h, strat)
-            --print (b, encode b)
-            Net.send s (encode b)
+            Net.send s (BL.toStrict $ encode b)
             waitForQuery s lbl' clr' mvar
           Nothing -> do
-            Net.send s (encode False)
+            Net.send s (BL.toStrict $ encode False)
             waitForQuery s lbl clr mvar
       Nothing -> do
-        Net.send s (encode False)
+        Net.send s (BL.toStrict $ encode False)
         waitForQuery s lbl clr mvar)
     (\(e :: SomeException) -> return ())
 

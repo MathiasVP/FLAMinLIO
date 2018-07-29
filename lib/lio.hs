@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE DeriveFoldable #-}
 {-# LANGUAGE DeriveTraversable #-}
@@ -17,6 +18,7 @@ import Control.Monad.Catch
 import Control.Monad.Reader
 import GHC.Exts(Constraint)
 import Algebra.PartialOrd
+import GHC.Generics hiding (C)
 import qualified Data.List as List
 
 class ToLabel a l where
@@ -44,7 +46,7 @@ data BoundedLabel l = BoundedLabel { _cur :: l, _clearance :: l }
 makeLenses ''BoundedLabel
   
 newtype Strategy l = Strategy { unStrategy :: [l] }
-  deriving (Eq, Ord, Functor)
+  deriving (Eq, Ord, Functor, Generic)
 
 instance Eq l => PartialOrd (Strategy l) where
   x `leq` y = unStrategy x `List.isPrefixOf` unStrategy y

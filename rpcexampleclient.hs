@@ -15,8 +15,8 @@ import Control.Lens
 example :: FLAMIO ()
 example = do
   connectRPC ("127.0.0.1", "8000", "Server") $ \socket -> do
-    rpc socket "g" (("Admin" %) :: Principal) (("User" %) :: Principal) >>= \case
-      Just (p :: Principal) -> liftIO $ print p
+    rpc socket "f" (10 :: Int) ("a" :: String) >>= \case
+      Just (p :: [String]) -> liftIO $ print p
       Nothing -> error "RPC failed!"
     return ()
 

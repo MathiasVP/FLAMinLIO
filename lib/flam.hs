@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE InstanceSigs #-}
@@ -41,8 +42,12 @@ import Algebra.PartialOrd
 import Algebra.Lattice.Op
 import Data.Foldable
 import Data.Typeable
-import Lib.Serializable
 import Control.Concurrent
+import Data.Dynamic.Binary
+import GHC.Generics
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.Binary as Bin
+import Data.Binary(Binary)
 
 import qualified Data.ByteString as B
 import qualified Network.Simple.TCP as Net
@@ -65,7 +70,7 @@ data Principal
   | (:→) !Principal
   | (:←) !Principal
   | !Principal ::: !Principal
-  deriving (Eq, Ord)
+  deriving (Eq, Ord, Generic)
 
 instance Show Principal where
   showsPrec _ (:⊤) = showString "⊤"
@@ -683,7 +688,8 @@ distrR (p, (:←) (q1 :/\ q2)) = p .≽. ((q1 ←) /\ (q2 ←))
 distrR (p, (:←) (q1 :\/ q2)) = p .≽. ((q1 ←) \/ (q2 ←))
 distrR _ = return $ Failed Set.empty
 
-instance Serializable Principal where
+{-
+instance Encodable Principal where
   encode (:⊤) = B.singleton 0
   encode (:⊥) = B.singleton 1
   encode (Name s) = B.cons 2 (encode s)
@@ -693,6 +699,9 @@ instance Serializable Principal where
   encode ((:←) p) = B.cons 6 (encode p)
   encode (p1 ::: p2) = B.cons 7 (encode (p1, p2))
 
+  maxSize _ = 1024
+
+instance Decodable Principal where
   decode' bs =
     case B.uncons bs of
       Just (0, bs') -> Just ((:⊤), bs')
@@ -705,17 +714,24 @@ instance Serializable Principal where
       Just (7, bs') -> uncurry (:::) </> decode' bs'
       _ -> Nothing
 
-  maxSize _ = 1024
-
-instance Serializable a => Serializable (Labeled Principal a) where
+instance Encodable a => Encodable (Labeled Principal a) where
   encode (Labeled l a) = encode (l, a)
-  decode' bs = uncurry Labeled </> decode' bs
   maxSize _ = maxSize (undefined :: FLAM, undefined :: a)
 
-instance Serializable l => Serializable (Strategy l) where
+instance Decodable a => Decodable (Labeled Principal a) where
+  decode' bs = uncurry Labeled </> decode' bs
+
+instance Encodable l => Encodable (Strategy l) where
   encode (Strategy ls) = encode ls
-  decode' bs = Strategy </> decode' bs
   maxSize _ = 1024
+
+instance Decodable l => Decodable (Strategy l) where
+  decode' bs = Strategy </> decode' bs
+-}
+
+instance Binary s => Binary (Strategy s)
+  
+instance Binary Principal
   
 forward :: forall m . MonadFLAMIO m => (Principal, Principal) -> m QueryResult
 forward (p, q) = do
@@ -731,11 +747,10 @@ forward (p, q) = do
     run [] = return $ Failed Set.empty
     run (LSocketRPC (s, n) : ns) = do
       strat <- getStrategy
-      liftFLAMIO $ liftLIO $ liftIO $ Net.send s (encode (p, q, strat))
-      liftFLAMIO (liftLIO $ liftIO $ Net.recv s (maxSize (undefined :: Bool))) >>= \case
+      liftFLAMIO $ liftLIO $ liftIO $ Net.send s (BL.toStrict $ Bin.encode (p, q, strat))
+      liftFLAMIO (liftLIO $ liftIO $ Net.recv s 1) >>= \case
         Just bs -> do
-          --liftFLAMIO $ liftLIO $ liftIO $ print bs
-          case decode bs of
+          case Bin.decode (BL.fromStrict bs) of
             Just True -> return $ Success $ Set.empty
             _ -> run ns
             
@@ -1025,7 +1040,7 @@ top :: Principal
 top = (:→) (:⊤) :/\ (:←) (:⊥)
 
 data LSocket a where
-  LSocket :: Serializable a => (Net.Socket, Principal) -> LSocket a
+  LSocket :: Binary a => (Net.Socket, Principal) -> LSocket a
 
 newtype LSocketRPC = LSocketRPC (Net.Socket, Principal)
   deriving Eq
@@ -1033,8 +1048,18 @@ newtype LSocketRPC = LSocketRPC (Net.Socket, Principal)
 class RPCInvokable t
 
 class Typeable f => Curryable f where
-  c :: (Typeable a, Typeable b) => f -> a -> Maybe b
-  
+  c :: (Typeable a) => f -> [Dynamic] -> Maybe a
+
+class Typeable f => Curryable' (isArrow :: Bool) f where
+  c' :: (Typeable a) => Proxy isArrow -> f -> [Dynamic] -> Maybe a
+
+type family IsArrow a where
+  IsArrow (a -> b) = 'True
+  IsArrow _ = 'False
+
+instance (IsArrow f ~ isArrow, Typeable f, Curryable' isArrow f) => Curryable f where
+  c f xs = c' (Proxy :: Proxy isArrow) f xs
+
 data RPCInvokableExt = forall t a b . (RPCInvokable t, Typeable t, Curryable t) => RPCInvokableExt t
 
 data FLAMIOSt = FLAMIOSt { _cache :: Cache,

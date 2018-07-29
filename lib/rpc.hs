@@ -1,3 +1,6 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TypeSynonymInstances #-}
@@ -14,7 +17,6 @@ module Lib.RPC where
 import Lib.LIO
 import Lib.FLAM
 import Lib.Network
-import Lib.Serializable
 import Control.Monad.IO.Class
 import Control.Monad.State
 import Control.Monad.Catch
@@ -26,198 +28,74 @@ import qualified Data.ByteString.Char8 as B8
 import qualified Network.Simple.TCP as Net
 import Control.Lens.Tuple
 import Data.Typeable
-import Data.Tuple.Only
+import Data.Binary
+import Data.Dynamic.Binary
 import Control.Lens hiding ((:<))
 
-instance {-# Overlaps #-} Serializable a => RPCInvokable a
-instance {-# Overlaps #-} (Serializable a, RPCInvokable r) => RPCInvokable (a -> r)
+instance {-# Overlaps #-} Binary a => RPCInvokable a
+instance {-# Overlaps #-} (Binary a, RPCInvokable r) => RPCInvokable (a -> r)
 
 class RPCType a where
-  rpc :: (Serializable b, Typeable b, Show b) => LSocketRPC -> String -> b -> a
+  rpc :: (Binary b, Typeable b, Show b, Bin.Binary b) => LSocketRPC -> String -> b -> a
 
-instance (Typeable a, Serializable a, RPCType r, Show a) => RPCType (a -> r) where
-  rpc socket f arg1 = \arg2 -> rpc socket f (arg1, arg2)
+class RPCType' a where
+  rpc' :: (Binary b, Typeable b, Show b, Bin.Binary b) => LSocketRPC -> [Dynamic] -> String -> b -> a
 
-instance Serializable a => RPCType (FLAMIO (Maybe a)) where
-  rpc (LSocketRPC (s, name)) f args = do
-    liftIO $ Net.send s (encode (f, args))
-    liftIO (Net.recv s (maxSize (undefined :: Maybe a))) >>= \case
+instance RPCType' a => RPCType a where
+  rpc socket f args = rpc' socket [] f args
+
+instance (Typeable a, Binary a, RPCType' r, Show a, Bin.Binary a) => RPCType' (a -> r) where
+  rpc' socket args f arg1 = \arg2 -> rpc' socket (toDyn arg1 : args) f arg2
+
+instance (Binary a, Typeable a, Bin.Binary a) => RPCType' (FLAMIO (Maybe a)) where
+  rpc' (LSocketRPC (s, name)) args f arg = do
+    liftIO $ Net.send s (BL.toStrict $ encode (f, List.reverse (toDyn arg : args)))
+    liftIO (Net.recv s 1024) >>= \case
       Just bs -> do
-        case (decode bs :: Maybe (Maybe a)) of
-          Just a -> return a
-          Nothing -> return Nothing
+        case (decodeOrFail (BL.fromStrict bs)) of
+          Left _ -> return Nothing
+          Right (_, _, Just a) -> return $ fromDynamic a
+          _ -> return Nothing
       Nothing -> return Nothing
 
-recvRPC :: forall m a b . (MonadIO m, MonadMask m, MonadFLAMIO m, Serializable b) => LSocketRPC -> m (Maybe (String, b))
-recvRPC (LSocketRPC (s, name)) =
-  Net.recv s (maxSize (undefined :: (String, b))) >>= \case
+recvRPC :: forall m a . (MonadIO m, MonadMask m, MonadFLAMIO m) => LSocketRPC -> m (Maybe (String, [Dynamic]))
+recvRPC (LSocketRPC (s, name)) = do
+  Net.recv s 1024 >>= \case
     Nothing -> return Nothing
-    Just x -> do
-      case decode x of
-        Nothing -> return Nothing
-        Just y -> return $ Just y
+    Just bs -> do
+      case decodeOrFail (BL.fromStrict bs) of
+        Left _ -> return Nothing
+        Right (_, _, y) -> return $ Just y
 
-sendRPCResult :: (MonadIO m, MonadMask m, MonadFLAMIO m, Serializable a) => LSocketRPC -> Maybe a -> m ()
-sendRPCResult (LSocketRPC (s, name)) ma = Net.send s (encode ma) 
+invoke :: RPCInvokableExt -> [Dynamic] -> Maybe Dynamic
+invoke (RPCInvokableExt f) = join . c f
 
-invoke :: (Typeable a, Typeable b) => RPCInvokableExt -> a -> Maybe b
-invoke (RPCInvokableExt f) xs = c f xs
+sendRPCResult :: (MonadIO m, MonadMask m, MonadFLAMIO m, Binary a) => LSocketRPC -> Maybe a -> m ()
+sendRPCResult (LSocketRPC (s, name)) ma = Net.send s (BL.toStrict $ encode ma)
 
-instance {-# Overlaps #-} (Typeable a, Typeable b) => Curryable (a -> b) where
-  c f x =
-    case (cast f, cast x :: Maybe a) of
-      (Just g, Just a) -> Just $ g a
+instance Typeable a => Curryable' 'False a where
+  c' _ a [] = cast a
+
+instance (Typeable a, Typeable b, Curryable b) => Curryable' 'True (a -> b) where
+  c' _ f (x : xs) =
+    case (cast x :: Maybe a) of
+      Just a -> c (f a) xs
       _ -> Nothing
 
-instance {-# Overlaps #-} (Typeable a, Typeable b, Typeable c) => Curryable (a -> b -> c) where
-  c f x =
-    case (cast f, cast x :: Maybe (a, b)) of
-      (Just g, Just (a, b)) -> Just $ g a b
-      _ -> case (cast f, cast x :: Maybe a) of
-             (Just g, Just a) -> Just $ g a
-             _ -> Nothing
-      
-instance {-# Overlaps #-} (Typeable a, Typeable b, Typeable c, Typeable d) => Curryable (a -> b -> c -> d) where
-  c f x =
-    case (cast f, cast x :: Maybe ((a, b), c)) of
-      (Just g, Just ((a, b), c)) -> Just $ g a b c
-      _ -> case (cast f, cast x :: Maybe (a, b)) of
-             (Just g, Just (a, b)) -> Just $ g a b
-             _ -> case (cast f, cast x :: Maybe a) of
-                    (Just g, Just a) -> Just $ g a
-                    _ -> Nothing
+exportable1 :: (Bin.Binary a, Bin.Binary b, Typeable a, Typeable b) => (a -> b) -> Dynamic -> Maybe Dynamic
+exportable1 f da = do
+  a <- fromDynamic da
+  return $ toDyn $ f a
 
-instance {-# Overlaps #-} (Typeable a, Typeable b, Typeable c, Typeable d, Typeable e) => Curryable (a -> b -> c -> d -> e) where
-  c f x =
-    case (cast f, cast x :: Maybe (((a, b), c), d)) of
-      (Just g, Just (((a, b), c), d)) -> Just $ g a b c d
-      _ ->
-        case (cast f, cast x :: Maybe ((a, b), c)) of
-          (Just g, Just ((a, b), c)) -> Just $ g a b c
-          _ ->
-            case (cast f, cast x :: Maybe (a, b)) of
-              (Just g, Just (a, b)) -> Just $ g a b
-              _ ->
-                case (cast f, cast x :: Maybe a) of
-                  (Just g, Just a) -> Just $ g a
-                  _ -> Nothing
+exportable2 :: (Bin.Binary a, Bin.Binary b, Bin.Binary c, Typeable a, Typeable b, Typeable c) => (a -> b -> c) -> Dynamic -> Dynamic -> Maybe Dynamic
+exportable2 f da db = do
+  a <- fromDynamic da
+  b <- fromDynamic db
+  return $ toDyn $ f a b
 
-instance {-# Overlaps #-} (Typeable a, Typeable b, Typeable c, Typeable d, Typeable e, Typeable h) => Curryable (a -> b -> c -> d -> e -> h) where
-  c f x =
-    case (cast f, cast x :: Maybe ((((a, b), c), d), e)) of
-      (Just g, Just ((((a, b), c), d), e)) -> Just $ g a b c d e
-      _ ->
-        case (cast f, cast x :: Maybe (((a, b), c), d)) of
-          (Just g, Just (((a, b), c), d)) -> Just $ g a b c d
-          _ ->
-            case (cast f, cast x :: Maybe ((a, b), c)) of
-              (Just g, Just ((a, b), c)) -> Just $ g a b c
-              _ ->
-                case (cast f, cast x :: Maybe (a, b)) of
-                  (Just g, Just (a, b)) -> Just $ g a b
-                  _ ->
-                    case (cast f, cast x :: Maybe a) of
-                      (Just g, Just a) -> Just $ g a
-                      _ -> Nothing
-
-instance {-# Overlaps #-} (Typeable a, Typeable b, Typeable c, Typeable d, Typeable e, Typeable h, Typeable i) => Curryable (a -> b -> c -> d -> e -> h -> i) where
-  c f x =
-    case (cast f, cast x :: Maybe (((((a, b), c), d), e), h)) of
-      (Just g, Just (((((a, b), c), d), e), h)) -> Just $ g a b c d e h
-      _ ->
-        case (cast f, cast x :: Maybe ((((a, b), c), d), e)) of
-          (Just g, Just ((((a, b), c), d), e)) -> Just $ g a b c d e
-          _ ->
-            case (cast f, cast x :: Maybe (((a, b), c), d)) of
-              (Just g, Just (((a, b), c), d)) -> Just $ g a b c d
-              _ ->
-                case (cast f, cast x :: Maybe ((a, b), c)) of
-                  (Just g, Just ((a, b), c)) -> Just $ g a b c
-                  _ ->
-                    case (cast f, cast x :: Maybe (a, b)) of
-                      (Just g, Just (a, b)) -> Just $ g a b
-                      _ ->
-                        case (cast f, cast x :: Maybe a) of
-                          (Just g, Just a) -> Just $ g a
-                          _ -> Nothing
-
-instance {-# Overlaps #-} (Typeable a, Typeable b, Typeable c, Typeable d, Typeable e, Typeable h, Typeable i, Typeable j) => Curryable (a -> b -> c -> d -> e -> h -> i -> j) where
-  c f x =
-    case (cast f, cast x :: Maybe ((((((a, b), c), d), e), h), i)) of
-      (Just g, Just ((((((a, b), c), d), e), h), i)) -> Just $ g a b c d e h i
-      _ ->
-        case (cast f, cast x :: Maybe (((((a, b), c), d), e), h)) of
-          (Just g, Just (((((a, b), c), d), e), h)) -> Just $ g a b c d e h
-          _ ->
-            case (cast f, cast x :: Maybe ((((a, b), c), d), e)) of
-              (Just g, Just ((((a, b), c), d), e)) -> Just $ g a b c d e
-              _ ->
-                case (cast f, cast x :: Maybe (((a, b), c), d)) of
-                  (Just g, Just (((a, b), c), d)) -> Just $ g a b c d
-                  _ ->
-                    case (cast f, cast x :: Maybe ((a, b), c)) of
-                      (Just g, Just ((a, b), c)) -> Just $ g a b c
-                      _ ->
-                        case (cast f, cast x :: Maybe (a, b)) of
-                          (Just g, Just (a, b)) -> Just $ g a b
-                          _ ->
-                            case (cast f, cast x :: Maybe a) of
-                              (Just g, Just a) -> Just $ g a
-                              _ -> Nothing
-
-instance {-# Overlaps #-} (Typeable a, Typeable b, Typeable c, Typeable d, Typeable e, Typeable h, Typeable i, Typeable j, Typeable k) => Curryable (a -> b -> c -> d -> e -> h -> i -> j -> k) where
-  c f x =
-    case (cast f, cast x :: Maybe (((((((a, b), c), d), e), h), i), j)) of
-      (Just g, Just (((((((a, b), c), d), e), h), i), j)) -> Just $ g a b c d e h i j
-      _ ->
-        case (cast f, cast x :: Maybe ((((((a, b), c), d), e), h), i)) of
-          (Just g, Just ((((((a, b), c), d), e), h), i)) -> Just $ g a b c d e h i
-          _ ->
-            case (cast f, cast x :: Maybe (((((a, b), c), d), e), h)) of
-              (Just g, Just (((((a, b), c), d), e), h)) -> Just $ g a b c d e h
-              _ ->
-                case (cast f, cast x :: Maybe ((((a, b), c), d), e)) of
-                  (Just g, Just ((((a, b), c), d), e)) -> Just $ g a b c d e
-                  _ ->
-                    case (cast f, cast x :: Maybe (((a, b), c), d)) of
-                      (Just g, Just (((a, b), c), d)) -> Just $ g a b c d
-                      _ ->
-                        case (cast f, cast x :: Maybe ((a, b), c)) of
-                          (Just g, Just ((a, b), c)) -> Just $ g a b c
-                          _ ->
-                            case (cast f, cast x :: Maybe (a, b)) of
-                              (Just g, Just (a, b)) -> Just $ g a b
-                              _ ->
-                                case (cast f, cast x :: Maybe a) of
-                                  (Just g, Just a) -> Just $ g a
-                                  _ -> Nothing
-
-instance {-# Overlaps #-} (Typeable a, Typeable b, Typeable c, Typeable d, Typeable e, Typeable h, Typeable i, Typeable j, Typeable k, Typeable l) => Curryable (a -> b -> c -> d -> e -> h -> i -> j -> k -> l) where
-  c f x =
-    case (cast f, cast x :: Maybe ((((((((a, b), c), d), e), h), i), j), k)) of
-      (Just g, Just ((((((((a, b), c), d), e), h), i), j), k)) -> Just $ g a b c d e h i j k
-      _ ->
-        case (cast f, cast x :: Maybe (((((((a, b), c), d), e), h), i), j)) of
-          (Just g, Just (((((((a, b), c), d), e), h), i), j)) -> Just $ g a b c d e h i j
-          _ ->
-            case (cast f, cast x :: Maybe ((((((a, b), c), d), e), h), i)) of
-              (Just g, Just ((((((a, b), c), d), e), h), i)) -> Just $ g a b c d e h i
-              _ ->
-                case (cast f, cast x :: Maybe (((((a, b), c), d), e), h)) of
-                  (Just g, Just (((((a, b), c), d), e), h)) -> Just $ g a b c d e h
-                  _ ->
-                    case (cast f, cast x :: Maybe ((((a, b), c), d), e)) of
-                      (Just g, Just ((((a, b), c), d), e)) -> Just $ g a b c d e
-                      _ ->
-                        case (cast f, cast x :: Maybe (((a, b), c), d)) of
-                          (Just g, Just (((a, b), c), d)) -> Just $ g a b c d
-                          _ ->
-                            case (cast f, cast x :: Maybe ((a, b), c)) of
-                              (Just g, Just ((a, b), c)) -> Just $ g a b c
-                              _ ->
-                                case (cast f, cast x :: Maybe (a, b)) of
-                                  (Just g, Just (a, b)) -> Just $ g a b
-                                  _ ->
-                                    case (cast f, cast x :: Maybe a) of
-                                      (Just g, Just a) -> Just $ g a
-                                      _ -> Nothing
+exportable3 :: (Bin.Binary a, Bin.Binary b, Bin.Binary c, Bin.Binary d, Typeable a, Typeable b, Typeable c, Typeable d) => (a -> b -> c -> d) -> Dynamic -> Dynamic -> Dynamic -> Maybe Dynamic
+exportable3 f da db dc = do
+  a <- fromDynamic da
+  b <- fromDynamic db
+  c <- fromDynamic dc
+  return $ toDyn $ f a b c
