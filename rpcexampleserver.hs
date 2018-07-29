@@ -15,19 +15,22 @@ import qualified Data.ByteString.Char8 as B8
 import Data.Dynamic.Binary
 import qualified Data.Binary as Bin
 import qualified Data.ByteString.Lazy as BL   
-
+  
 example :: FLAMIO ()
 example = do
-  export "f" (exportable2 (replicate :: Int -> String -> [String]))
+  export "replicate" (exportable2 (replicate :: Int -> String -> [String]))
+  export "length" (exportable1 (List.length :: [Int] -> Int))
   serveRPC ("127.0.0.1", "8000", "Client") $ \socket -> do
-    recvRPC socket >>= \case
-      Just (s, args) -> do
-        lookupRPC s >>= \case
-          Just g -> do
-            case invoke g args of
-              Just r -> sendRPCResult socket (Just r)
-          Nothing -> error "Lookup failed!"
-      Nothing -> error "Receive failed!"
+    forever $ do
+      liftIO $ putStrLn "Waiting for rpc..."
+      recvRPC socket >>= \case
+        Just (s, args) -> do
+          lookupRPC s >>= \case
+            Just g -> do
+              case invoke g args of
+                Just r -> sendRPCResult socket (Just r)
+            Nothing -> error "Lookup failed!"
+        Nothing -> error "Receive failed!"
 
 main :: IO ()
 main =
