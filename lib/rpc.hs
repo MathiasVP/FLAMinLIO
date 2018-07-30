@@ -32,7 +32,7 @@ import Data.Binary
 import Data.Dynamic.Binary
 import Control.Lens hiding ((:<))
 
-instance {-# Overlaps #-} Binary a => RPCInvokable a
+instance {-# Overlaps #-} (MonadFLAMIO m, Binary a) => RPCInvokable (m a)
 instance {-# Overlaps #-} (Binary a, RPCInvokable r) => RPCInvokable (a -> r)
 
 class RPCType a where
@@ -67,35 +67,38 @@ recvRPC (LSocketRPC (s, name)) = do
         Left _ -> return Nothing
         Right (_, _, y) -> return $ Just y
 
-invoke :: RPCInvokableExt -> [Dynamic] -> Maybe Dynamic
-invoke (RPCInvokableExt f) = join . c f
+invoke :: (MonadFLAMIO m, Typeable m) => RPCInvokableExt -> [Dynamic] -> m (Maybe Dynamic)
+invoke (RPCInvokableExt f) xs = c f xs
 
 sendRPCResult :: (MonadIO m, MonadMask m, MonadFLAMIO m, Binary a) => LSocketRPC -> Maybe a -> m ()
 sendRPCResult (LSocketRPC (s, name)) ma = Net.send s (BL.toStrict $ encode ma)
 
-instance Typeable a => Curryable' 'False a where
-  c' _ a [] = cast a
+instance (Typeable a) => Curryable' 'False a where
+  c' _ a [] = do
+    case cast a of
+      Just ma -> ma
+      Nothing -> return Nothing
 
 instance (Typeable a, Typeable b, Curryable b) => Curryable' 'True (a -> b) where
-  c' _ f (x : xs) =
+  c' _ f (x : xs) = do
     case (cast x :: Maybe a) of
       Just a -> c (f a) xs
-      _ -> Nothing
+      _ -> return Nothing
 
-exportable1 :: (Bin.Binary a, Bin.Binary b, Typeable a, Typeable b) => (a -> b) -> Dynamic -> Maybe Dynamic
+exportable1 :: (MonadFLAMIO m, Bin.Binary a, Bin.Binary b, Typeable a, Typeable b) => (a -> m b) -> Dynamic -> m (Maybe Dynamic)
 exportable1 f da = do
-  a <- fromDynamic da
-  return $ toDyn $ f a
+  case fromDynamic da of
+    Just a -> Just . toDyn <$> f a
+    Nothing -> return Nothing
 
-exportable2 :: (Bin.Binary a, Bin.Binary b, Bin.Binary c, Typeable a, Typeable b, Typeable c) => (a -> b -> c) -> Dynamic -> Dynamic -> Maybe Dynamic
+exportable2 :: (MonadFLAMIO m, Bin.Binary a, Bin.Binary b, Bin.Binary c, Typeable a, Typeable b, Typeable c) => (a -> b -> m c) -> Dynamic -> Dynamic -> m (Maybe Dynamic)
 exportable2 f da db = do
-  a <- fromDynamic da
-  b <- fromDynamic db
-  return $ toDyn $ f a b
+  case (fromDynamic da, fromDynamic db) of
+    (Just a, Just b) -> Just . toDyn <$> f a b
+    _ -> return Nothing
 
-exportable3 :: (Bin.Binary a, Bin.Binary b, Bin.Binary c, Bin.Binary d, Typeable a, Typeable b, Typeable c, Typeable d) => (a -> b -> c -> d) -> Dynamic -> Dynamic -> Dynamic -> Maybe Dynamic
+exportable3 :: (MonadFLAMIO m, Bin.Binary a, Bin.Binary b, Bin.Binary c, Bin.Binary d, Typeable a, Typeable b, Typeable c, Typeable d) => (a -> b -> c -> m d) -> Dynamic -> Dynamic -> Dynamic -> m (Maybe Dynamic)
 exportable3 f da db dc = do
-  a <- fromDynamic da
-  b <- fromDynamic db
-  c <- fromDynamic dc
-  return $ toDyn $ f a b c
+  case (fromDynamic da, fromDynamic db, fromDynamic dc) of
+    (Just a, Just b, Just c) -> Just . toDyn <$> f a b c
+    _ -> return Nothing

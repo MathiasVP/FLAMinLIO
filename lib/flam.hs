@@ -1048,10 +1048,10 @@ newtype LSocketRPC = LSocketRPC (Net.Socket, Principal)
 class RPCInvokable t
 
 class Typeable f => Curryable f where
-  c :: (Typeable a) => f -> [Dynamic] -> Maybe a
+  c :: (Typeable m, MonadFLAMIO m) => f -> [Dynamic] -> m (Maybe Dynamic)
 
 class Typeable f => Curryable' (isArrow :: Bool) f where
-  c' :: (Typeable a) => Proxy isArrow -> f -> [Dynamic] -> Maybe a
+  c' :: (Typeable m, MonadFLAMIO m) => Proxy isArrow -> f -> [Dynamic] -> m (Maybe Dynamic)
 
 type family IsArrow a where
   IsArrow (a -> b) = 'True
@@ -1102,7 +1102,7 @@ removeSocketRPC :: MonadFLAMIO m => LSocketRPC -> m ()
 removeSocketRPC s =
   liftFLAMIO $ FLAMIO $ modify $ over sockets $ List.delete s
 
-export :: (MonadFLAMIO m, RPCInvokable t, Typeable t, Curryable t) => String -> t -> m ()
+export :: (MonadFLAMIO m, RPCInvokable t, Curryable t) => String -> t -> m ()
 export s f = liftFLAMIO $ FLAMIO $ modify $ over exports $
                Map.insert s (RPCInvokableExt f)
 
@@ -1122,7 +1122,7 @@ instance HasCache Cache FLAMIO where
 (∇) :: (ToLabel a Principal) => a -> Principal
 (∇) a = normalize $ (confidentiality p' ←) /\ (integrity p' ←)
   where p' = norm (a %)
-  
+
 addDelegate :: (MonadFLAMIO m, ToLabel a Principal, ToLabel b Principal, ToLabel c Principal) =>
                a -> b -> c -> m ()
 addDelegate p q l = do
