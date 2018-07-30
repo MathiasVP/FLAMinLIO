@@ -31,6 +31,7 @@ import Data.Typeable
 import Data.Binary
 import Data.Dynamic.Binary
 import Control.Lens hiding ((:<))
+import Control.Concurrent
 
 instance {-# Overlaps #-} (MonadFLAMIO m, Binary a) => RPCInvokable (m a)
 instance {-# Overlaps #-} (Binary a, RPCInvokable r) => RPCInvokable (a -> r)
@@ -48,21 +49,25 @@ instance (Typeable a, Binary a, RPCType' r, Show a, Bin.Binary a) => RPCType' (a
   rpc' socket args f arg1 = \arg2 -> rpc' socket (toDyn arg1 : args) f arg2
 
 instance (Binary a, Typeable a, Bin.Binary a) => RPCType' (FLAMIO (Maybe a)) where
-  rpc' (LSocketRPC (s, name)) args f arg = do
-    liftIO $ Net.send s (BL.toStrict $ encode (f, List.reverse (toDyn arg : args)))
-    liftIO (Net.recv s 1024) >>= \case
-      Just bs -> do
-        case (decodeOrFail (BL.fromStrict bs)) of
-          Left _ -> return Nothing
-          Right (_, _, Just a) -> return $ fromDynamic a
-          _ -> return Nothing
-      Nothing -> return Nothing
+  rpc' (LSocketRPC (s, name)) args f arg = trySend 100
+    where trySend 0 = return Nothing
+          trySend n = do
+            liftIO $ Net.send s (BL.toStrict $ encode (f, List.reverse (toDyn arg : args)))
+            liftIO (Net.recv s 1024) >>= \case
+              Just bs -> do
+                case (decodeOrFail (BL.fromStrict bs)) of
+                  Left _ -> return Nothing
+                  Right (_, _, Just a) -> return $ fromDynamic a
+                  Right (_, _, Nothing) -> return Nothing
+              Nothing -> do
+                liftIO $ threadDelay 100
+                trySend (n - 1)
 
 recvRPC :: forall m a . (MonadIO m, MonadMask m, MonadFLAMIO m) => LSocketRPC -> m (Maybe (String, [Dynamic]))
 recvRPC (LSocketRPC (s, name)) = do
   Net.recv s 1024 >>= \case
     Nothing -> return Nothing
-    Just bs -> do
+    Just bs ->
       case decodeOrFail (BL.fromStrict bs) of
         Left _ -> return Nothing
         Right (_, _, y) -> return $ Just y
@@ -71,7 +76,9 @@ invoke :: (MonadFLAMIO m, Typeable m) => RPCInvokableExt -> [Dynamic] -> m (Mayb
 invoke (RPCInvokableExt f) xs = c f xs
 
 sendRPCResult :: (MonadIO m, MonadMask m, MonadFLAMIO m, Binary a) => LSocketRPC -> Maybe a -> m ()
-sendRPCResult (LSocketRPC (s, name)) ma = Net.send s (BL.toStrict $ encode ma)
+sendRPCResult (LSocketRPC (s, name)) ma = do
+  liftIO $ print (encode ma)
+  Net.send s (BL.toStrict $ encode ma)
 
 instance (Typeable a) => Curryable' 'False a where
   c' _ a [] = do
@@ -101,4 +108,16 @@ exportable3 :: (MonadFLAMIO m, Bin.Binary a, Bin.Binary b, Bin.Binary c, Bin.Bin
 exportable3 f da db dc = do
   case (fromDynamic da, fromDynamic db, fromDynamic dc) of
     (Just a, Just b, Just c) -> Just . toDyn <$> f a b c
+    _ -> return Nothing
+
+exportable4 :: (MonadFLAMIO m, Bin.Binary a, Bin.Binary b, Bin.Binary c, Bin.Binary d, Bin.Binary e, Typeable a, Typeable b, Typeable c, Typeable d, Typeable e) => (a -> b -> c -> d -> m e) -> Dynamic -> Dynamic -> Dynamic -> Dynamic -> m (Maybe Dynamic)
+exportable4 f da db dc dd = do
+  case (fromDynamic da, fromDynamic db, fromDynamic dc, fromDynamic dd) of
+    (Just a, Just b, Just c, Just d) -> Just . toDyn <$> f a b c d
+    _ -> return Nothing
+
+exportable5 :: (MonadFLAMIO m, Bin.Binary a, Bin.Binary b, Bin.Binary c, Bin.Binary d, Bin.Binary e, Bin.Binary g, Typeable a, Typeable b, Typeable c, Typeable d, Typeable e, Typeable g) => (a -> b -> c -> d -> e -> m g) -> Dynamic -> Dynamic -> Dynamic -> Dynamic -> Dynamic -> m (Maybe Dynamic)
+exportable5 f da db dc dd dg = do
+  case (fromDynamic da, fromDynamic db, fromDynamic dc, fromDynamic dd, fromDynamic dg) of
+    (Just a, Just b, Just c, Just d, Just g) -> Just . toDyn <$> f a b c d g
     _ -> return Nothing

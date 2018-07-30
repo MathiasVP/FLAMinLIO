@@ -31,20 +31,78 @@ getBalance u a =
       liftIO $ putStrLn $ "Sending NoSuchUser"
       return $ NoSuchUser
 
+create :: User -> BankT FLAMIO Response
+create u =
+  Map.lookup u <$> get >>= \case
+    Just _ -> do
+      liftIO $ putStrLn $ "Sending UserAlreadyExists"
+      return UserAlreadyExists
+    Nothing -> do
+      lacc <- label u Map.empty
+      modify $ Map.insert u lacc
+      liftIO $ putStrLn $ "Sending Ack"
+      return $ Ack
+
+open :: User -> Account -> BankT FLAMIO Response
+open u a =
+  Map.lookup u <$> get >>= \case
+    Just lacc -> do
+      acc <- unlabel lacc
+      lacc' <- label u (Map.insert a 100 acc)
+      modify $ Map.insert u lacc'
+      liftIO $ putStrLn $ "Sending Ack"
+      return Ack
+    Nothing -> do
+      liftIO $ putStrLn $ "Sending NoSuchUser"
+      return NoSuchUser
+
+transfer :: User -> Account -> User -> Account -> Int -> BankT FLAMIO Response
+transfer uFrom aFrom uTo aTo n =
+  Map.lookup uFrom <$> get >>= \case
+    Just laccFrom -> do
+      accFrom <- unlabel laccFrom
+      case Map.lookup aFrom accFrom of
+        Just balFrom
+          | balFrom >= n -> do
+              Map.lookup uTo <$> get >>= \case
+                Just laccTo -> do
+                  accTo <- unlabel laccTo
+                  accTo' <- label uTo $ Map.update (Just . (+ n)) aTo accTo
+                  modify $ Map.insert uTo accTo'
+                  accFrom' <- label uFrom $ Map.update (Just . (subtract n)) aFrom accFrom
+                  modify $ Map.insert uFrom accFrom'
+                  liftIO $ putStrLn $ "Sending Ack"
+                  return Ack
+                Nothing -> do
+                  liftIO $ putStrLn $ "Sending NoSuchAccount"
+                  return NoSuchAccount
+          | otherwise -> do
+              liftIO $ putStrLn $ "Sending NotSuccifientFunds"
+              return NotSufficientFunds
+        Nothing -> do
+          liftIO $ putStrLn $ "Sending NoSuchAccount"
+          return NoSuchAccount
+    Nothing -> do
+      liftIO $ putStrLn $ "Sending NoSuchUser"
+      return NoSuchUser
+
 example :: BankT FLAMIO ()
 example = do
   export "getBalance" (exportable2 getBalance)
+  export "create" (exportable1 create)
+  export "open" (exportable2 open)
+  export "transfer" (exportable5 transfer)
   serveRPC ("127.0.0.1", "8000", "Client") $ \socket -> do
-    liftIO $ putStrLn "Waiting for rpc..."
-    recvRPC socket >>= \case
-      Just (s, args) -> do
-        lookupRPC s >>= \case
-          Just g -> do
-            invoke g args >>= \case
-              Just r -> sendRPCResult socket (Just r)
-              Nothing -> error "Invoke failed!"
-          Nothing -> error "Lookup failed!"
-      Nothing -> error "Receive failed!"
+    forever $ do
+      recvRPC socket >>= \case
+        Just (s, args) -> do
+          lookupRPC s >>= \case
+            Just g -> do
+              invoke g args >>= \case
+                Just r -> sendRPCResult socket (Just r)
+                Nothing -> return ()
+            Nothing -> return ()
+        Nothing -> return ()
 
 main :: IO ()
 main =

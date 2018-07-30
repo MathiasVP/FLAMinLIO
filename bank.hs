@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE UndecidableInstances #-}
@@ -14,6 +15,8 @@ import Data.Map(Map)
 import qualified Data.ByteString as B
 import Control.Monad.State
 import Control.Monad.Catch
+import GHC.Generics
+import qualified Data.Binary as Bin
 
 type User = String
 type Account = String
@@ -64,29 +67,9 @@ data Request
   | StartSession User
   | EndSession
   | Create User
-  deriving Show
+  deriving (Show, Generic)
 
-instance Serializable Request where
-  encode (GetBalance u a) = B.cons 0 (encode (u, a))
-  encode (Transfer n (u1, a1) (u2, a2)) = B.cons 1 (encode (n, (u1, a1), (u2, a2)))
-  encode (OpenAccount u a) = B.cons 2 (encode (u, a))
-  encode (CloseAccount u a) = B.cons 3 (encode (u, a))
-  encode (StartSession u) = B.cons 4 (encode u)
-  encode EndSession = B.singleton 5
-  encode (Create u) = B.cons 6 (encode u)
-
-  decode bs =
-    case B.uncons bs of
-      Just (0, bs') -> uncurry GetBalance <$> decode bs'
-      Just (1, bs') -> uncurry3 Transfer <$> decode bs'
-      Just (2, bs') -> uncurry OpenAccount <$> decode bs'
-      Just (3, bs') -> uncurry CloseAccount <$> decode bs'
-      Just (4, bs') -> StartSession <$> decode bs'
-      Just (5, bs') | bs' == B.empty -> Just EndSession
-      Just (6, bs') -> Create <$> decode bs'
-      _ -> Nothing
-
-  maxSize _ = 1 + maxSize (undefined :: Int) + 2 * maxSize (undefined :: (User, Account))
+instance Bin.Binary Request
 
 data Response
   = Ack
@@ -97,28 +80,6 @@ data Response
   | ProtocolError
   | NotSufficientFunds
   | UserAlreadyExists
-  deriving Show
+  deriving (Show, Generic)
 
-instance Serializable Response where
-  encode Ack = B.singleton 0 
-  encode (Balance n) = B.cons 1 (encode n)
-  encode NoSuchAccount = B.singleton 2
-  encode NoSuchUser = B.singleton 3
-  encode NonEmptyAccount = B.singleton 4
-  encode ProtocolError = B.singleton 5
-  encode NotSufficientFunds = B.singleton 6
-  encode UserAlreadyExists = B.singleton 7
-  
-  decode bs =
-    case B.uncons bs of
-      Just (0, bs') | bs' == B.empty -> Just Ack
-      Just (1, bs') -> Balance <$> decode bs'
-      Just (2, bs') | bs' == B.empty -> Just NoSuchAccount
-      Just (3, bs') | bs' == B.empty -> Just NoSuchUser
-      Just (4, bs') | bs' == B.empty -> Just NonEmptyAccount
-      Just (5, bs') | bs' == B.empty -> Just ProtocolError
-      Just (6, bs') | bs' == B.empty -> Just NotSufficientFunds
-      Just (7, bs') | bs' == B.empty -> Just UserAlreadyExists
-      _ -> Nothing
-
-  maxSize _ = 1 + maxSize (undefined :: Int)
+instance Bin.Binary Response
