@@ -47,7 +47,7 @@ instance (Typeable a, Binary a, RPCType' r) => RPCType' (a -> r) where
 
 instance (Binary a, Typeable a) => RPCType' (FLAMIO (Maybe a)) where
   rpc' (LSocketRPC (s, name)) args f arg =do
-    liftIO $ send s (f, List.reverse (toDyn arg : args))
+    liftIO $ send s (Just (f, List.reverse (toDyn arg : args)))
     liftIO (recv s) >>= \case
       Just (lma :: Labeled Principal (Maybe Dynamic)) -> do
         ma <- unlabel lma
@@ -56,7 +56,7 @@ instance (Binary a, Typeable a) => RPCType' (FLAMIO (Maybe a)) where
           Nothing -> return Nothing
       Nothing -> return Nothing
 
-recvRPC :: forall m a . (MonadIO m, MonadMask m, MonadFLAMIO m) => LSocketRPC -> m (Maybe (String, [Dynamic]))
+recvRPC :: forall m a . (MonadIO m, MonadMask m, MonadFLAMIO m) => LSocketRPC -> m (Maybe (Maybe (String, [Dynamic])))
 recvRPC (LSocketRPC (s, name)) = recv s
 
 invoke :: (MonadFLAMIO m, Typeable m) => RPCInvokableExt -> [Dynamic] -> m (Maybe Dynamic)

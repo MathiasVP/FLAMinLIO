@@ -27,6 +27,7 @@ import Control.Lens hiding ((:<))
 import Control.Concurrent
 import Data.Typeable
 import Data.Binary
+import Data.Dynamic.Binary
 
 type IP = String
 type Name = String
@@ -54,13 +55,11 @@ serve :: (MonadIO m, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b 
 serve (ip, port, name, fwdPort) f = do
   Net.listen (Net.Host ip) port (\(socket, addr) ->
     Net.accept socket (\(socket', _) -> do
-      --liftIO $ putStrLn $ "Now connected on port: " ++ show port ++ " for rpc. Socket is: " ++ show socket'
       send socket' False -- Send dummy message to the client saying "I am now waiting on a connection for forward requests"
       Net.listen (Net.Host ip) fwdPort (\(fwdsocket, fwdaddr) ->
         Net.accept fwdsocket (\(fwdsocket', _) ->
           let lfwdsocket = LSocketRPC (fwdsocket', (%) name)
-          in do --liftIO $ putStrLn $ "Now connected on port: " ++ show fwdPort ++ " for forwards. Socket is: " ++ show fwdsocket'
-                putSocketRPC lfwdsocket
+          in do putSocketRPC lfwdsocket
                 h <- liftFLAMIO $ getHPtr
                 lbl <- getLabel
                 clr <- getClearance
@@ -71,24 +70,21 @@ serve (ip, port, name, fwdPort) f = do
             
 connect :: (MonadIO m, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocketRPC -> m r) -> m ()
 connect (ip, port, name, fwdPort) f = do
-  --liftIO $ putStrLn $ "Connecting on port: " ++ show port ++ " for rpc!"
   Net.connect ip port (\(socket, _) -> do
-    --liftIO $ putStrLn $ "Now connected on port: " ++ show port ++ " for rpc. Socket is: " ++ show socket
-    --liftIO $ putStrLn $ "Connecting on port: " ++ show fwdPort ++ " for forwards!"
     -- Wait for the server to say "I am now listening for a connection for doing forward requests"
     recv socket >>= \case
       Just (_ :: Bool) -> 
         Net.connect ip fwdPort (\(fwdsocket, _) ->
           let lfwdsocket = LSocketRPC (fwdsocket, (%) name)
-          in do --liftIO $ putStrLn $ "Now connected on port: " ++ show fwdPort ++ " for forwards. Socket is: " ++ show fwdsocket
-                putSocketRPC lfwdsocket
+          in do putSocketRPC lfwdsocket
                 h <- liftFLAMIO $ getHPtr
                 lbl <- getLabel
                 clr <- getClearance
                 tid <- liftFLAMIO $ liftLIO $ liftIO $ forkIO (waitForQuery fwdsocket lbl clr h)
                 f (LSocketRPC (socket, (%) name))
                 removeSocketRPC lfwdsocket
-                liftFLAMIO $ liftLIO $ liftIO $ killThread tid)
+                liftFLAMIO $ liftLIO $ liftIO $ killThread tid
+                send socket (Nothing :: Maybe (String, [Dynamic])))
       Nothing -> error "Could not establish connection for forward requests!")
 
 instance MonadThrow m => MonadThrow (AssumptionsT m) where

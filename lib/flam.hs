@@ -707,10 +707,7 @@ forward (p, q) = do
     run [] = return $ Failed Set.empty
     run (LSocketRPC (s, n) : ns) = do
       strat <- getStrategy
-      --liftFLAMIO $ liftLIO $ liftIO $ putStrLn $ "Sending: " ++ show (Bin.encode (p, q, strat))
       liftFLAMIO $ liftLIO $ liftIO $ send s (p, q, strat)
-      --liftFLAMIO $ liftLIO $ liftIO $ threadDelay 100
-      --liftFLAMIO $ liftLIO $ liftIO $ putStrLn "Waiting for response..."
       liftFLAMIO (liftLIO $ liftIO $ recv s) >>= \case
         Just True -> return $ Success $ Set.empty
         _ -> run ns

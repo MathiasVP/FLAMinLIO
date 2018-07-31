@@ -22,26 +22,17 @@ getBalance u a =
   Map.lookup u <$> get >>= \case
     Just lacc ->
       Map.lookup a <$> unlabel lacc >>= \case
-        Just bal -> do
-          liftIO $ putStrLn $ "Sending balance " ++ show bal
-          return $ Balance bal
-        Nothing -> do
-          liftIO $ putStrLn $ "Sending NoSuchAccount"
-          return $ NoSuchAccount
-    Nothing -> do
-      liftIO $ putStrLn $ "Sending NoSuchUser"
-      return $ NoSuchUser
+        Just bal -> return $ Balance bal
+        Nothing -> return $ NoSuchAccount
+    Nothing -> return $ NoSuchUser
 
 create :: User -> BankT FLAMIO Response
 create u =
   Map.lookup u <$> get >>= \case
-    Just _ -> do
-      liftIO $ putStrLn $ "Sending UserAlreadyExists"
-      return UserAlreadyExists
+    Just _ -> return UserAlreadyExists
     Nothing -> do
       lacc <- label u Map.empty
       modify $ Map.insert u lacc
-      liftIO $ putStrLn $ "Sending Ack"
       return Ack
 
 open :: User -> Account -> BankT FLAMIO Response
@@ -51,14 +42,11 @@ open u a =
       acc <- unlabel lacc
       lacc' <- label u (Map.insert a 100 acc)
       modify $ Map.insert u lacc'
-      liftIO $ putStrLn $ "Sending Ack"
       return Ack
-    Nothing -> do
-      liftIO $ putStrLn $ "Sending NoSuchUser"
-      return NoSuchUser
+    Nothing -> return NoSuchUser
 
 transfer :: User -> Account -> User -> Account -> Int -> BankT FLAMIO Response
-transfer uFrom aFrom uTo aTo n =
+transfer uFrom aFrom uTo aTo n = do
   Map.lookup uFrom <$> get >>= \case
     Just laccFrom -> do
       accFrom <- unlabel laccFrom
@@ -75,44 +63,44 @@ transfer uFrom aFrom uTo aTo n =
                   toLabeled clr $ do
                     accFrom' <- label uFrom $ Map.update (Just . (subtract n)) aFrom accFrom
                     modify $ Map.insert uFrom accFrom'
-                  liftIO $ putStrLn $ "Sending Ack"
                   return Ack
-                Nothing -> do
-                  liftIO $ putStrLn $ "Sending NoSuchAccount"
-                  return NoSuchAccount
-          | otherwise -> do
-              liftIO $ putStrLn $ "Sending NotSuccifientFunds"
-              return NotSufficientFunds
-        Nothing -> do
-          liftIO $ putStrLn $ "Sending NoSuchAccount"
-          return NoSuchAccount
-    Nothing -> do
-      liftIO $ putStrLn $ "Sending NoSuchUser"
-      return NoSuchUser
+                Nothing -> return NoSuchAccount
+          | otherwise -> return NotSufficientFunds
+        Nothing -> return NoSuchAccount
+    Nothing -> return NoSuchUser
+
+repeatUntilM :: Monad m => m Bool -> m ()
+repeatUntilM m =
+  m >>= \case
+    True -> repeatUntilM m
+    False -> return ()
 
 example :: BankT FLAMIO ()
 example = do
   create "Chloe"
   open "Chloe" "Checking"
   liftLIO $ modify $ _1 . cur .~ bot
+
+  addDelegate ("Mathias" ←) ("Chloe" ←) "Mathias"
   
   export "getBalance" (exportable2 getBalance)
   export "create" (exportable1 create)
   export "open" (exportable2 open)
   export "transfer" (exportable5 transfer)
-  
-  addDelegate ("Mathias" ←) ("Chloe" ←) "Mathias"
 
-  serve ("127.0.0.1", "8000", (⊤), "8001") $ \socket -> do
-    withStrategy ["Mathias"] $ do
-      forever $ do
-        recvRPC socket >>= \case
-          Just (s, args) -> do
-            lookupRPC s >>= \case
-              Just g -> invoke g args >>= sendRPCResult socket
-              Nothing -> sendRPCResult socket (Nothing :: Maybe Dynamic)
-          Nothing -> sendRPCResult socket (Nothing :: Maybe Dynamic)
-
+  forever $ do
+    serve ("127.0.0.1", "8000", (⊤), "8001") $ \socket -> do
+      repeatUntilM $ do
+        withStrategy [top] $ do
+          recvRPC socket >>= \case
+            Just (Just (s, args)) -> do
+              lookupRPC s >>= \case
+                Just g -> invoke g args >>= sendRPCResult socket >> return True
+                Nothing -> sendRPCResult socket (Nothing :: Maybe Dynamic) >> return True
+            Just Nothing -> return False
+            Nothing -> sendRPCResult socket (Nothing :: Maybe Dynamic) >> return True
+    liftLIO $ modify $ _1 . cur .~ bot
+             
 main :: IO ()
 main =
   evalStateT (runFLAM $ evalStateT (runBankT example) Map.empty)
