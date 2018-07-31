@@ -1,5 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE PostfixOperators #-}
 
 module RPCExampleServer where
 
@@ -41,7 +42,7 @@ create u =
       lacc <- label u Map.empty
       modify $ Map.insert u lacc
       liftIO $ putStrLn $ "Sending Ack"
-      return $ Ack
+      return Ack
 
 open :: User -> Account -> BankT FLAMIO Response
 open u a =
@@ -66,11 +67,14 @@ transfer uFrom aFrom uTo aTo n =
           | balFrom >= n -> do
               Map.lookup uTo <$> get >>= \case
                 Just laccTo -> do
-                  accTo <- unlabel laccTo
-                  accTo' <- label uTo $ Map.update (Just . (+ n)) aTo accTo
-                  modify $ Map.insert uTo accTo'
-                  accFrom' <- label uFrom $ Map.update (Just . (subtract n)) aFrom accFrom
-                  modify $ Map.insert uFrom accFrom'
+                  clr <- getClearance
+                  toLabeled clr $ do
+                    accTo <- unlabel laccTo
+                    accTo' <- label uTo $ Map.update (Just . (+ n)) aTo accTo
+                    modify $ Map.insert uTo accTo'
+                  toLabeled clr $ do
+                    accFrom' <- label uFrom $ Map.update (Just . (subtract n)) aFrom accFrom
+                    modify $ Map.insert uFrom accFrom'
                   liftIO $ putStrLn $ "Sending Ack"
                   return Ack
                 Nothing -> do
@@ -88,21 +92,26 @@ transfer uFrom aFrom uTo aTo n =
 
 example :: BankT FLAMIO ()
 example = do
+  create "Chloe"
+  open "Chloe" "Checking"
+  liftLIO $ modify $ _1 . cur .~ bot
+  
   export "getBalance" (exportable2 getBalance)
   export "create" (exportable1 create)
   export "open" (exportable2 open)
   export "transfer" (exportable5 transfer)
-  serveRPC ("127.0.0.1", "8000", "Client") $ \socket -> do
-    forever $ do
-      recvRPC socket >>= \case
-        Just (s, args) -> do
-          lookupRPC s >>= \case
-            Just g -> do
-              invoke g args >>= \case
-                Just r -> sendRPCResult socket (Just r)
-                Nothing -> return ()
-            Nothing -> return ()
-        Nothing -> return ()
+  
+  addDelegate ("Mathias" ←) ("Chloe" ←) "Mathias"
+
+  serve ("127.0.0.1", "8000", (⊤), "8001") $ \socket -> do
+    withStrategy ["Mathias"] $ do
+      forever $ do
+        recvRPC socket >>= \case
+          Just (s, args) -> do
+            lookupRPC s >>= \case
+              Just g -> invoke g args >>= sendRPCResult socket
+              Nothing -> sendRPCResult socket (Nothing :: Maybe Dynamic)
+          Nothing -> sendRPCResult socket (Nothing :: Maybe Dynamic)
 
 main :: IO ()
 main =

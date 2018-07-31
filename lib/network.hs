@@ -10,6 +10,7 @@ module Lib.Network where
 
 import Lib.FLAM
 import Lib.LIO
+import Lib.SendRecv
 import qualified Data.List as List
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -17,13 +18,11 @@ import Control.Monad.IO.Class
 import Control.Monad.State
 import Control.Monad.Catch
 import Control.Monad.Reader
-import qualified Data.Binary as Bin
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Char8 as B8
 import qualified Network.Simple.TCP as Net
 import Control.Lens.Tuple
-import Data.Tuple.Only
 import Control.Lens hiding ((:<))
 import Control.Concurrent
 import Data.Typeable
@@ -32,67 +31,65 @@ import Data.Binary
 type IP = String
 type Name = String
 type Port = String
-type Host a = (IP, Port, a)
+type Host a = (IP, Port, a, Port)
 
 channelLabel :: LSocket a -> Principal
 channelLabel (LSocket (_, s)) = s
-
-serve :: (MonadIO m, Binary a, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocket a -> m r) -> m ()
-serve (ip, port, name) f = do
-  Net.listen (Net.Host ip) port (\(socket, addr) -> Net.accept socket (\(socket', _) -> f (LSocket (socket', (%) name))))
-  return ()
-  
-connect :: (MonadIO m, Binary a, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocket a -> m r) -> m ()
-connect (ip, port, name) f = do
-  Net.connect ip port (\(socket, _) -> f (LSocket (socket, (%) name)))
-  return ()
 
 waitForQuery :: Net.Socket -> Principal -> Principal -> MVar H -> IO ()
 waitForQuery s lbl clr mvar = do
   catch (do
     h <- readMVar mvar
-    Net.recv s 1024 >>= \case
-      Just bs -> do
-        case decode (BL.fromStrict bs) of
-          Just (p :: Principal, q :: Principal, strat :: Strategy Principal) -> do
-            (b, (BoundedLabel lbl' clr', _, strat')) <- runStateT (runFLAM (p ≽ q)) (BoundedLabel lbl clr, h, strat)
-            Net.send s (BL.toStrict $ encode b)
-            waitForQuery s lbl' clr' mvar
-          Nothing -> do
-            Net.send s (BL.toStrict $ encode False)
-            waitForQuery s lbl clr mvar
+    recv s >>= \case
+      Just (p :: Principal, q :: Principal, strat :: Strategy Principal) -> do
+        (b, (BoundedLabel lbl' clr', _, _)) <- runStateT (runFLAM (p ≽ q)) (BoundedLabel lbl clr, h, strat)
+        send s b
+        waitForQuery s lbl' clr' mvar
       Nothing -> do
-        Net.send s (BL.toStrict $ encode False)
+        send s False
         waitForQuery s lbl clr mvar)
     (\(e :: SomeException) -> return ())
 
-serveRPC :: (MonadIO m, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocketRPC -> m r) -> m ()
-serveRPC (ip, port, name) f = do
+serve :: (MonadIO m, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocketRPC -> m r) -> m ()
+serve (ip, port, name, fwdPort) f = do
   Net.listen (Net.Host ip) port (\(socket, addr) ->
-    Net.accept socket (\(socket', _) ->
-      let lsocket = LSocketRPC (socket', (%) name)
-      in do putSocketRPC lsocket
-            h <- liftFLAMIO $ getHPtr
-            lbl <- getLabel
-            clr <- getClearance
-            tid <- liftFLAMIO $ liftLIO $ liftIO $ forkIO (waitForQuery socket' lbl clr h)
-            f lsocket
-            liftFLAMIO $ liftLIO $ liftIO $ killThread tid
-            removeSocketRPC lsocket))
+    Net.accept socket (\(socket', _) -> do
+      --liftIO $ putStrLn $ "Now connected on port: " ++ show port ++ " for rpc. Socket is: " ++ show socket'
+      send socket' False -- Send dummy message to the client saying "I am now waiting on a connection for forward requests"
+      Net.listen (Net.Host ip) fwdPort (\(fwdsocket, fwdaddr) ->
+        Net.accept fwdsocket (\(fwdsocket', _) ->
+          let lfwdsocket = LSocketRPC (fwdsocket', (%) name)
+          in do --liftIO $ putStrLn $ "Now connected on port: " ++ show fwdPort ++ " for forwards. Socket is: " ++ show fwdsocket'
+                putSocketRPC lfwdsocket
+                h <- liftFLAMIO $ getHPtr
+                lbl <- getLabel
+                clr <- getClearance
+                tid <- liftFLAMIO $ liftLIO $ liftIO $ forkIO (waitForQuery fwdsocket' lbl clr h)
+                f (LSocketRPC (socket', (%) name))
+                removeSocketRPC lfwdsocket
+                liftFLAMIO $ liftLIO $ liftIO $ killThread tid))))
             
-connectRPC :: (MonadIO m, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocketRPC -> m r) -> m ()
-connectRPC (ip, port, name) f = do
-  Net.connect ip port (\(socket, _) ->
-    let lsocket = LSocketRPC (socket, (%) name)
-    in do
-      putSocketRPC lsocket
-      h <- liftFLAMIO $ getHPtr
-      lbl <- getLabel
-      clr <- getClearance
-      tid <- liftFLAMIO $ liftLIO $ liftIO $ forkIO (waitForQuery socket lbl clr h)
-      f lsocket
-      liftFLAMIO $ liftLIO $ liftIO $ killThread tid
-      removeSocketRPC lsocket)
+connect :: (MonadIO m, MonadMask m, MonadFLAMIO m, ToLabel b Principal) => Host b -> (LSocketRPC -> m r) -> m ()
+connect (ip, port, name, fwdPort) f = do
+  --liftIO $ putStrLn $ "Connecting on port: " ++ show port ++ " for rpc!"
+  Net.connect ip port (\(socket, _) -> do
+    --liftIO $ putStrLn $ "Now connected on port: " ++ show port ++ " for rpc. Socket is: " ++ show socket
+    --liftIO $ putStrLn $ "Connecting on port: " ++ show fwdPort ++ " for forwards!"
+    -- Wait for the server to say "I am now listening for a connection for doing forward requests"
+    recv socket >>= \case
+      Just (_ :: Bool) -> 
+        Net.connect ip fwdPort (\(fwdsocket, _) ->
+          let lfwdsocket = LSocketRPC (fwdsocket, (%) name)
+          in do --liftIO $ putStrLn $ "Now connected on port: " ++ show fwdPort ++ " for forwards. Socket is: " ++ show fwdsocket
+                putSocketRPC lfwdsocket
+                h <- liftFLAMIO $ getHPtr
+                lbl <- getLabel
+                clr <- getClearance
+                tid <- liftFLAMIO $ liftLIO $ liftIO $ forkIO (waitForQuery fwdsocket lbl clr h)
+                f (LSocketRPC (socket, (%) name))
+                removeSocketRPC lfwdsocket
+                liftFLAMIO $ liftLIO $ liftIO $ killThread tid)
+      Nothing -> error "Could not establish connection for forward requests!")
 
 instance MonadThrow m => MonadThrow (AssumptionsT m) where
   throwM = AssumptionsT . throwM

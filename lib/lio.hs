@@ -20,6 +20,7 @@ import GHC.Exts(Constraint)
 import Algebra.PartialOrd
 import GHC.Generics hiding (C)
 import qualified Data.List as List
+import Data.Binary
 
 class ToLabel a l where
   (%) :: a -> l
@@ -46,7 +47,7 @@ data BoundedLabel l = BoundedLabel { _cur :: l, _clearance :: l }
 makeLenses ''BoundedLabel
   
 newtype Strategy l = Strategy { unStrategy :: [l] }
-  deriving (Eq, Ord, Functor, Generic)
+  deriving (Eq, Ord, Functor, Generic, Show)
 
 instance Eq l => PartialOrd (Strategy l) where
   x `leq` y = unStrategy x `List.isPrefixOf` unStrategy y
@@ -116,6 +117,9 @@ setState :: (MonadLIO s l m, Label s l) => s -> m ()
 setState s = liftLIO $ modify $ _2 .~ s
 
 data Labeled l a = Labeled { _labeledLab :: l, _labeledVal :: a }
+  deriving Generic
+
+instance (Binary l, Binary a) => Binary (Labeled l a)
 
 makeLenses ''Labeled
 

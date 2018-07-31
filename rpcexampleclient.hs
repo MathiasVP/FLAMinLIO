@@ -17,7 +17,7 @@ import Data.Binary
 
 example :: FLAMIO ()
 example = do
-  connectRPC ("127.0.0.1", "8000", "Server") $ \socket -> do
+  connect ("127.0.0.1", "8000", (⊤), "8001") $ \socket -> do
     rpc socket "create" ("Mathias" :: User) >>= \case
       Just (p :: Response) -> liftIO $ print p
       Nothing -> error "RPC failed!"
@@ -25,12 +25,29 @@ example = do
     rpc socket "open" ("Mathias" :: User) ("Savings" :: Account) >>= \case
       Just (p :: Response) -> liftIO $ print p
       Nothing -> error "RPC failed!"
-      
+
     rpc socket "getBalance" ("Mathias" :: User) ("Savings" :: Account) >>= \case
       Just (p :: Response) -> liftIO $ print p
       Nothing -> error "RPC failed!"
 
+    newScope $ do
+      withStrategy ["Mathias"] $ do
+        addDelegate ("Chloe" ←) ("Mathias" ←) "Mathias"
+        addDelegate ("Chloe" →) ("Mathias" →) "Mathias"
+        
+        rpc socket "transfer" ("Mathias" :: User) ("Savings" :: Account)
+                              ("Chloe" :: User) ("Checking" :: Account)
+                              (50 :: Int) >>= \case
+          Just (p :: Response) -> liftIO $ print p
+          Nothing -> error "RPC failed!"
+
+    rpc socket "getBalance" ("Mathias" :: User) ("Savings" :: Account) >>= \case
+      Just (p :: Response) -> liftIO $ print p
+      Nothing -> error "RPC failed!"
+    liftIO getLine
+    return ()
+
 main :: IO ()
 main =
   evalStateT (runFLAM example)
-    (BoundedLabel { _cur = bot, _clearance = top }, H Set.empty, noStrategy)
+    (BoundedLabel { _cur = bot, _clearance = ("Mathias" %) }, H Set.empty, noStrategy)

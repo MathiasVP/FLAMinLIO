@@ -21,6 +21,7 @@ module Lib.FLAM where
 
 import Prelude hiding ((^))
 import Lib.LIO
+import Lib.SendRecv
 import Lib.TCB()
 import qualified Data.List as List
 import qualified Data.Map.Strict as Map
@@ -688,56 +689,15 @@ distrR (p, (:←) (q1 :/\ q2)) = p .≽. ((q1 ←) /\ (q2 ←))
 distrR (p, (:←) (q1 :\/ q2)) = p .≽. ((q1 ←) \/ (q2 ←))
 distrR _ = return $ Failed Set.empty
 
-{-
-instance Encodable Principal where
-  encode (:⊤) = B.singleton 0
-  encode (:⊥) = B.singleton 1
-  encode (Name s) = B.cons 2 (encode s)
-  encode (p1 :/\ p2) = B.cons 3 (encode (p1, p2))
-  encode (p1 :\/ p2) = B.cons 4 (encode (p1, p2))
-  encode ((:→) p) = B.cons 5 (encode p)
-  encode ((:←) p) = B.cons 6 (encode p)
-  encode (p1 ::: p2) = B.cons 7 (encode (p1, p2))
-
-  maxSize _ = 1024
-
-instance Decodable Principal where
-  decode' bs =
-    case B.uncons bs of
-      Just (0, bs') -> Just ((:⊤), bs')
-      Just (1, bs') -> Just ((:⊥), bs')
-      Just (2, bs') -> Name </> decode' bs'
-      Just (3, bs') -> uncurry (:/\) </> decode' bs'
-      Just (4, bs') -> uncurry (:\/) </> decode' bs'
-      Just (5, bs') -> (:→) </> decode' bs'
-      Just (6, bs') -> (:←) </> decode' bs'
-      Just (7, bs') -> uncurry (:::) </> decode' bs'
-      _ -> Nothing
-
-instance Encodable a => Encodable (Labeled Principal a) where
-  encode (Labeled l a) = encode (l, a)
-  maxSize _ = maxSize (undefined :: FLAM, undefined :: a)
-
-instance Decodable a => Decodable (Labeled Principal a) where
-  decode' bs = uncurry Labeled </> decode' bs
-
-instance Encodable l => Encodable (Strategy l) where
-  encode (Strategy ls) = encode ls
-  maxSize _ = 1024
-
-instance Decodable l => Decodable (Strategy l) where
-  decode' bs = Strategy </> decode' bs
--}
-
 instance Binary s => Binary (Strategy s)
   
 instance Binary Principal
-  
+
 forward :: forall m . MonadFLAMIO m => (Principal, Principal) -> m QueryResult
 forward (p, q) = do
   l <- getLabel
   (ns, a) <- runWriterT (lift getSocketsRPC >>=
-                    filterM (\(LSocketRPC (_, n)) ->
+                    filterM (\(LSocketRPC (_, n)) -> do
                                 lift (n .≽. l >>= lowerB') >>= \case
                                   (True, a) -> tell a >> return True
                                   (False, a) -> tell a >> return False))
@@ -747,14 +707,13 @@ forward (p, q) = do
     run [] = return $ Failed Set.empty
     run (LSocketRPC (s, n) : ns) = do
       strat <- getStrategy
-      liftFLAMIO $ liftLIO $ liftIO $ Net.send s (BL.toStrict $ Bin.encode (p, q, strat))
-      liftFLAMIO (liftLIO $ liftIO $ Net.recv s 1) >>= \case
-        Just bs -> do
-          case Bin.decode (BL.fromStrict bs) of
-            Just True -> return $ Success $ Set.empty
-            _ -> run ns
-            
-        Nothing -> run ns
+      --liftFLAMIO $ liftLIO $ liftIO $ putStrLn $ "Sending: " ++ show (Bin.encode (p, q, strat))
+      liftFLAMIO $ liftLIO $ liftIO $ send s (p, q, strat)
+      --liftFLAMIO $ liftLIO $ liftIO $ threadDelay 100
+      --liftFLAMIO $ liftLIO $ liftIO $ putStrLn "Waiting for response..."
+      liftFLAMIO (liftLIO $ liftIO $ recv s) >>= \case
+        Just True -> return $ Success $ Set.empty
+        _ -> run ns
 
 (.≽) :: MonadFLAMIO m => Principal -> Principal -> m QueryResult
 p .≽ q =
@@ -776,8 +735,7 @@ p .≽ q =
   forward (p, q)
   
 (≽) :: (MonadFLAMIO m, ToLabel a Principal, ToLabel b Principal) => a -> b -> m Bool
-p ≽ q =
-  runReaderT (unAssumptionsT ((normalize (p %) .≽. normalize (q %)) >>= lowerB)) Set.empty
+p ≽ q = runReaderT (unAssumptionsT ((normalize (p %) .≽. normalize (q %)) >>= lowerB)) Set.empty
 infix 6 ≽
 
 instance SemiLattice Principal where
@@ -1043,7 +1001,7 @@ data LSocket a where
   LSocket :: Binary a => (Net.Socket, Principal) -> LSocket a
 
 newtype LSocketRPC = LSocketRPC (Net.Socket, Principal)
-  deriving Eq
+  deriving (Eq, Show)
 
 class RPCInvokable t
 
