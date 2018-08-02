@@ -21,6 +21,7 @@ import Algebra.PartialOrd
 import GHC.Generics hiding (C)
 import qualified Data.List as List
 import Data.Binary
+import Control.Concurrent.Forkable
 
 class ToLabel a l where
   (%) :: a -> l
@@ -255,3 +256,9 @@ instance Label s l => MonadMask (LIO s l) where
     (unLIO acquire)
     (\resource exitCase -> unLIO (release resource exitCase))
     (\resource -> unLIO (use resource))
+
+instance Label s l => ForkableMonad (LIO s l) where
+  forkIO (LIO m) = LIO $ forkIO m
+
+instance Label s l => MonadFix (LIO s l) where
+  mfix f = LIO $ mfix $ \a -> unLIO (f a)

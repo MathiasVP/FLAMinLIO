@@ -43,14 +43,13 @@ import Algebra.PartialOrd
 import Algebra.Lattice.Op
 import Data.Foldable
 import Data.Typeable
-import Control.Concurrent
 import Data.Dynamic.Binary
 import GHC.Generics
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Binary as Bin
 import Data.Binary(Binary)
+import Control.Concurrent.Forkable
 
-import qualified Data.ByteString as B
 import qualified Network.Simple.TCP as Net
 
 listview :: Ord a => Set a -> [a]
@@ -1137,3 +1136,15 @@ instance MonadFLAMIO m => MonadFLAMIO (ReaderT r m) where
 
 instance MonadFLAMIO m => MonadFLAMIO (AssumptionsT m) where
   liftFLAMIO = lift . liftFLAMIO
+
+instance ForkableMonad m => ForkableMonad (AssumptionsT m) where
+  forkIO (AssumptionsT m) = AssumptionsT $ forkIO m
+  
+instance ForkableMonad FLAMIO where
+  forkIO (FLAMIO m) = FLAMIO $ forkIO m
+
+instance MonadFix m => MonadFix (AssumptionsT m) where
+  mfix f = AssumptionsT $ mfix $ \a -> unAssumptionsT (f a)
+  
+instance MonadFix FLAMIO where
+  mfix f = FLAMIO $ mfix $ \a -> unFLAMIO (f a)

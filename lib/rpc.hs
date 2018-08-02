@@ -38,7 +38,7 @@ class RPCType a where
 
 class RPCType' a where
   rpc' :: (Binary b, Typeable b) => LSocketRPC -> [Dynamic] -> String -> b -> a
-
+  
 instance RPCType' a => RPCType a where
   rpc socket f args = rpc' socket [] f args
 
@@ -46,7 +46,7 @@ instance (Typeable a, Binary a, RPCType' r) => RPCType' (a -> r) where
   rpc' socket args f arg1 = \arg2 -> rpc' socket (toDyn arg1 : args) f arg2
 
 instance (Binary a, Typeable a) => RPCType' (FLAMIO (Maybe a)) where
-  rpc' (LSocketRPC (s, name)) args f arg =do
+  rpc' (LSocketRPC (s, name)) args f arg = do
     liftIO $ send s (Just (f, List.reverse (toDyn arg : args)))
     liftIO (recv s) >>= \case
       Just (lma :: Labeled Principal (Maybe Dynamic)) -> do

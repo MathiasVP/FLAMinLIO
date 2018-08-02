@@ -77,11 +77,11 @@ repeatUntilM m =
 
 example :: BankT FLAMIO ()
 example = do
-  create "Chloe"
-  open "Chloe" "Checking"
-  liftLIO $ modify $ _1 . cur .~ bot
+  toLabeled top $ do
+    create "Chloe"
+    open "Chloe" "Checking"
 
-  addDelegate ("Mathias" ←) ("Chloe" ←) "Mathias"
+  addDelegate ("Mathias" ←) ("Chloe" ←) bot
   
   export "getBalance" (exportable2 getBalance)
   export "create" (exportable1 create)
@@ -90,17 +90,17 @@ example = do
 
   forever $ do
     serve ("127.0.0.1", "8000", (⊤), "8001") $ \socket -> do
-      repeatUntilM $ do
-        withStrategy [top] $ do
-          recvRPC socket >>= \case
-            Just (Just (s, args)) -> do
-              lookupRPC s >>= \case
-                Just g -> invoke g args >>= sendRPCResult socket >> return True
-                Nothing -> sendRPCResult socket (Nothing :: Maybe Dynamic) >> return True
-            Just Nothing -> return False
-            Nothing -> sendRPCResult socket (Nothing :: Maybe Dynamic) >> return True
-    liftLIO $ modify $ _1 . cur .~ bot
-             
+      toLabeled top $
+        repeatUntilM $ do
+          withStrategy [top] $ do
+            recvRPC socket >>= \case
+              Just (Just (s, args)) -> do
+                lookupRPC s >>= \case
+                  Just g -> invoke g args >>= sendRPCResult socket >> return True
+                  Nothing -> sendRPCResult socket (Nothing :: Maybe Dynamic) >> return True
+              Just Nothing -> return False
+              Nothing -> sendRPCResult socket (Nothing :: Maybe Dynamic) >> return True
+
 main :: IO ()
 main =
   evalStateT (runFLAM $ evalStateT (runBankT example) Map.empty)
