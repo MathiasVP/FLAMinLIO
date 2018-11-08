@@ -47,10 +47,16 @@ import Data.Dynamic.Binary
 import GHC.Generics
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Binary as Bin
-import Data.Binary(Binary)
+import Data.Binary(Binary, Get, Put)
 import Control.Concurrent.Forkable
+import GHC.Read
+import qualified Text.ParserCombinators.ReadPrec as R
+import Text.ParserCombinators.ReadPrec((<++))
+import Control.Exception hiding (mask, try)
+import Control.Monad.Catch
 
 import qualified Network.Simple.TCP as Net
+import qualified Network.Socket as NS
 
 listview :: Ord a => Set a -> [a]
 listview = Set.toList
@@ -70,7 +76,9 @@ data Principal
   | (:→) !Principal
   | (:←) !Principal
   | !Principal ::: !Principal
-  deriving (Eq, Ord, Generic)
+  deriving (Eq, Ord, Generic, Read)
+
+instance Binary Principal
 
 instance Show Principal where
   showsPrec _ (:⊤) = showString "⊤"
@@ -93,14 +101,16 @@ instance Show Principal where
     else showsPrec 11 p . showString " : " . showsPrec 11 q
   
 newtype H = H { unH :: Set (Labeled Principal (Principal, Principal)) }
-  deriving (Ord, Eq, Show)
+  deriving (Ord, Eq, Show, Generic, Binary)
 
 data L
   = N !String
   | T
   | B
   | !L :.: !L
-  deriving (Eq, Ord)
+  deriving (Eq, Ord, Generic)
+
+instance Binary L
 
 instance Show L where
   show (N s) = s
@@ -109,7 +119,7 @@ instance Show L where
   show (l1 :.: l2) = show l1 ++ " : " ++ show l2
 
 newtype M = M { unM :: Set L } -- L₁ \/ L₂ \/ ... \/ Lₙ
-  deriving (Eq, Ord)
+  deriving (Eq, Ord, Generic, Binary)
 
 instance Show M where
   show (M ls) = show' (Set.toList ls)
@@ -118,7 +128,7 @@ instance Show M where
           show' (l : ls') = show l ++ " ∨ " ++ show' ls'
 
 newtype J = J { unJ :: Set M } -- M₁ /\ M₂ /\ ... /\ Mₙ
-  deriving (Eq, Ord)
+  deriving (Eq, Ord, Generic, Binary)
 
 instance Show J where
   show (J ms) = show' (Set.toList ms)
@@ -138,7 +148,9 @@ data ProgressCondition
   | Disj !(ProgressCondition) !(ProgressCondition)
   | TrueCondition
   | FalseCondition
-  deriving Eq
+  deriving (Eq, Generic)
+
+instance Binary ProgressCondition
 
 instance Show (ProgressCondition) where
   showsPrec n (ActsFor x y) =
@@ -153,16 +165,16 @@ instance Show (ProgressCondition) where
   showsPrec _ TrueCondition = showString "True"
   showsPrec _ FalseCondition = showString "False"
 
+type ForwardCache = Map Principal (Map (Principal, Principal) Bool)
 type Assumptions = Set (Principal, Principal)
-newtype AssumptionsT m a = AssumptionsT { unAssumptionsT :: ReaderT Assumptions m a }
-  deriving (Functor, Applicative, Monad, MonadReader Assumptions)
-
-instance MonadState s m => MonadState s (AssumptionsT m) where
-  get = AssumptionsT get
-  put = AssumptionsT . put
+newtype AssumptionsT m a = AssumptionsT { unAssumptionsT :: StateT ForwardCache (ReaderT (Assumptions, Set Principal) m) a }
+  deriving (Functor, Applicative, Monad, MonadState ForwardCache, MonadReader (Assumptions, Set Principal), MonadIO)
 
 instance (PartialOrd a, PartialOrd b, PartialOrd c) => PartialOrd (a, b, c) where
   (a1, b1, c1) `leq` (a2, b2, c2) = a1 `leq` a2 && b1 `leq` b2 && c1 `leq` c2
+
+instance (PartialOrd a, PartialOrd b, PartialOrd c, PartialOrd d) => PartialOrd (a, b, c, d) where
+  (a1, b1, c1, d1) `leq` (a2, b2, c2, d2) = a1 `leq` a2 && b1 `leq` b2 && c1 `leq` c2 && d1 `leq` d2
 
 instance PartialOrd Principal where
   x `leq` y = x <= y
@@ -170,17 +182,30 @@ instance PartialOrd Principal where
 instance PartialOrd H where
   H x `leq` H y = x `leq` y
 
+data LSocket a where
+  LSocket :: Binary a => (Net.Socket, Principal) -> LSocket a
+
+type IP = String
+type Port = String
+
+newtype LSocketRPC = LSocketRPC (Net.Socket, Principal)
+  deriving (Eq, Show, Generic)
+
+channelLabel :: LSocketRPC -> Principal
+channelLabel (LSocketRPC (_, s)) = s
+
 type SureCache = Map (Principal, Principal) (Map (Principal, Principal) Principal)
 type UnsureCache = Map (Principal, Principal) (ProgressCondition)
 
 type ReachabilityCache = Map (Set ((Principal, Principal), Assumptions)) ((Set ((J, J), Assumptions), Set ((J, J), Assumptions)))
-type ProvedCache = POMap (Assumptions, Strategy Principal, H) SureCache
+type ProvedCache = POMap (Assumptions, Strategy Principal, H, [LSocketRPC]) SureCache
 type PrunedCache = Map Assumptions (Map (Principal, Principal) UnsureCache)
-type FailedCache = POMap (Op (Assumptions, Strategy Principal, H)) SureCache
+type FailedCache = POMap (Op (Assumptions, Strategy Principal, H, [LSocketRPC])) SureCache
 data Cache = Cache { _reachabilityCache :: !ReachabilityCache,
                      _provedCache :: !ProvedCache,
                      _prunedCache :: !PrunedCache,
                      _failedCache :: !FailedCache }
+
 makeLenses ''Cache
 
 emptyCache :: Cache
@@ -209,18 +234,29 @@ data QueryResult
   deriving Show
 
 (^) :: QueryResult -> Assumptions -> QueryResult
-Failed a1 ^ a2 = Failed (Set.union a1 a2)
+Failed a ^ _ = Failed a
 Success a1 ^ a2 = Success (Set.union a1 a2)
 Pruned pc a1 ^ a2 = Pruned pc (Set.union a1 a2)
+
+(^!) :: QueryResult -> Assumptions -> QueryResult
+Failed a1 ^! a2 = Failed (Set.union a1 a2)
+Success a ^! _ = Success a
+Pruned pc a1 ^! a2 = Pruned pc (Set.union a1 a2)
 
 liftB :: Assumptions -> Bool -> QueryResult
 liftB a True = Success a
 liftB a False = Failed a
 
-class (MonadLIO H Principal m) => MonadFLAMIO m where
+class (MonadLIO Principal m) => MonadFLAMIO m where
   liftFLAMIO :: FLAMIO a -> m a
 
-newtype FLAMIO a = FLAMIO { unFLAMIO :: AssumptionsT (StateT FLAMIOSt (LIO H FLAM)) a }
+instance (MonadLIO l m, Monoid a) => MonadLIO l (WriterT a m) where 
+  liftLIO m = WriterT $ liftLIO m >>= \a -> return (a, mempty)
+  
+instance (MonadFLAMIO m, Monoid a) => MonadFLAMIO (WriterT a m) where
+  liftFLAMIO m = WriterT $ liftFLAMIO m >>= \a -> return (a, mempty)
+
+newtype FLAMIO a = FLAMIO { unFLAMIO :: AssumptionsT (StateT FLAMIOSt (LIO FLAM)) a }
   deriving (Functor, Applicative, Monad)
 
 lowerB' :: MonadFLAMIO m => QueryResult -> m (Bool, Assumptions)
@@ -258,7 +294,7 @@ infixr 8 <&&&>
 (<|||>) m1 m2 =
   m1 >>= \case
     Success a -> return $ Success a
-    Failed a -> (^) <$> m2 <*> pure a
+    Failed a -> (^!) <$> m2 <*> pure a
     Pruned pc1 a1 ->
       m2 >>= \case
         Success a2 -> return $ Success (a1 `Set.union` a2)
@@ -311,7 +347,8 @@ mapMaybeKeepM f (mapview -> Just ((k, a), m)) = do
     Just b -> return (m1, Map.insert k b m2)
     Nothing -> return (Map.insert k a m1, m2)
 
-alterSure :: (Maybe (Map (Principal, Principal) Principal) -> Maybe (Map (Principal, Principal) Principal)) ->
+alterSure :: (Maybe (Map (Principal, Principal) Principal) ->
+              Maybe (Map (Principal, Principal) Principal)) ->
              Principal -> Principal ->
              Maybe SureCache -> Maybe SureCache
 alterSure f cur clr Nothing = Map.singleton (cur, clr) <$> f Nothing
@@ -358,14 +395,24 @@ adjustOrInsert f k m =
     Just v -> Map.insert k (f (Just v)) m
     Nothing -> Map.insert k (f Nothing) m
 
+modifyCache :: MonadFLAMIO m => (Cache -> Cache) -> m ()
+modifyCache f = liftFLAMIO $ FLAMIO $ lift $ modify $ over cache f
+
+getsCache :: MonadFLAMIO m => (Cache -> a) -> m a
+getsCache f = liftFLAMIO $ FLAMIO $ lift $ gets $ views cache f
+
+getCache :: MonadFLAMIO m =>  m Cache
+getCache = liftFLAMIO $ FLAMIO $ lift $ gets $ view cache
+
 update :: forall m . MonadFLAMIO m => (Principal, Principal) -> (Principal, Principal) -> QueryResult -> m ()
 update (cur, clr) (p, q) (Success a) = do
   cur' <- liftLIO getLabel
-  h <- liftLIO $ gets $ view _2
-  strat <- liftLIO $ gets $ view _3
-  liftFLAMIO $ modifyCache $ over provedCache $ adjustPOMapGT (adjustOrInsert (insert p q cur') (cur, clr)) (a, strat, h)
-  liftFLAMIO $ modifyCache $ over provedCache $ POMap.alter (alterSure (Just . insert p q cur') cur clr) (a, strat, h)
-  liftFLAMIO $ modifyCache $ over prunedCache $ adjustMapGE (Map.adjust (Map.delete (p, q)) (cur, clr)) a
+  h <- getH
+  strat <- liftLIO $ gets $ view _2
+  useSocketsRPC $ \socks -> do
+    liftFLAMIO $ modifyCache $ over provedCache $ adjustPOMapGT (adjustOrInsert (insert p q cur') (cur, clr)) (a, strat, h, socks)
+    liftFLAMIO $ modifyCache $ over provedCache $ POMap.alter (alterSure (Just . insert p q cur') cur clr) (a, strat, h, socks)
+    liftFLAMIO $ modifyCache $ over prunedCache $ adjustMapGE (Map.adjust (Map.delete (p, q)) (cur, clr)) a
   prunedmap <- Map.lookup a <$> liftFLAMIO (getsCache (view prunedCache)) >>= \case
     Just prunedmap ->
       case Map.lookup (cur, clr) prunedmap of
@@ -376,11 +423,11 @@ update (cur, clr) (p, q) (Success a) = do
   
 update (cur, clr) (p, q) (Pruned pc a) = do
   h <- liftLIO $ gets $ view _2
-  strat <- liftLIO $ gets $ view _3
-  liftFLAMIO $ modifyCache $ over prunedCache $ adjustOrInsert (\case
-                                                                   Just m -> Map.alter (Just . insert p q pc) (cur, clr) m
-                                                                   Nothing -> Map.singleton (cur, clr) (Map.singleton (p, q) pc)
-                                                                   ) a
+  strat <- liftLIO $ gets $ view _2
+  liftFLAMIO $ modifyCache $ over prunedCache $ adjustOrInsert
+    (\case
+        Just m -> Map.alter (Just . insert p q pc) (cur, clr) m
+        Nothing -> Map.singleton (cur, clr) (Map.singleton (p, q) pc)) a
   prunedmap <- Map.lookup a <$> liftFLAMIO (getsCache (view prunedCache)) >>= \case
     Just prunedmap ->
       case Map.lookup (cur, clr) prunedmap of
@@ -393,11 +440,13 @@ update (cur, clr) (p, q) (Pruned pc a) = do
 
 update (cur, clr) (p, q) (Failed a) = do
   cur' <- liftLIO getLabel
-  h <- liftLIO $ gets $ view _2
-  strat <- liftLIO $ gets $ view _3
-  liftFLAMIO $ modifyCache $ over failedCache $ adjustPOMapGT (adjustOrInsert (insert p q cur') (cur, clr)) (Op (a, strat, h))
-  liftFLAMIO $ modifyCache $ over failedCache $ POMap.alter (alterSure (Just . insert p q cur') cur clr) (Op (a, strat, h))
-  liftFLAMIO $ modifyCache $ over prunedCache $ adjustMapLE (Map.adjust (Map.delete (p, q)) (cur, clr)) a
+  h <- getH
+  strat <- liftLIO $ gets $ view _2
+  socks <- getSocketsRPC
+  useSocketsRPC $ \socks -> do
+    liftFLAMIO $ modifyCache $ over failedCache $ adjustPOMapGT (adjustOrInsert (insert p q cur') (cur, clr)) (Op (a, strat, h, socks))
+    liftFLAMIO $ modifyCache $ over failedCache $ POMap.alter (alterSure (Just . insert p q cur') cur clr) (Op (a, strat, h, socks))
+    liftFLAMIO $ modifyCache $ over prunedCache $ adjustMapLE (Map.adjust (Map.delete (p, q)) (cur, clr)) a
   pruned <- Map.takeWhileAntitone (`leq` a) <$> (liftFLAMIO $ getsCache $ view prunedCache)
   forM_ (Map.toList pruned) $ \(assumptions, prunedmap) ->
     case Map.lookup (cur, clr) prunedmap of
@@ -410,10 +459,10 @@ update (cur, clr) (p, q) (Failed a) = do
       Nothing -> return ()
 
 searchSurePOMap :: (Principal, Principal) -> (Principal, Principal) ->
-                   POMap (Assumptions, Strategy Principal, H) SureCache -> Maybe (Principal, Assumptions)
+                   POMap (Assumptions, Strategy Principal, H, [LSocketRPC]) SureCache -> Maybe (Principal, Assumptions)
 searchSurePOMap (cur, clr) (p, q) m = search (POMap.toList m)
   where search [] = Nothing
-        search (((a, _, _), c) : cs) =
+        search (((a, _, _, _), c) : cs) =
           case Map.lookup (cur, clr) c of
           Just m -> case Map.lookup (p, q) m of
                       Just p -> Just (p, a)
@@ -421,33 +470,46 @@ searchSurePOMap (cur, clr) (p, q) m = search (POMap.toList m)
           Nothing -> search cs
 
 searchSurePOMapOp :: (Principal, Principal) -> (Principal, Principal) ->
-                     POMap (Op (Assumptions, Strategy Principal, H)) SureCache -> Maybe (Principal, Assumptions)
+                     POMap (Op (Assumptions, Strategy Principal, H, [LSocketRPC])) SureCache -> Maybe (Principal, Assumptions)
 searchSurePOMapOp (cur, clr) (p, q) m = search (POMap.toList m)
   where search [] = Nothing
-        search ((Op (a, _, _), c) : cs) =
+        search ((Op (a, _, _, _), c) : cs) =
           case Map.lookup (cur, clr) c of
           Just m -> case Map.lookup (p, q) m of
                       Just p -> Just (p, a)
                       Nothing -> search cs
           Nothing -> search cs
 
+getAssumptions :: MonadFLAMIO m => m Assumptions
+getAssumptions = liftFLAMIO $ FLAMIO $ asks (view _1)
+
+getForwardCache :: MonadFLAMIO m => m ForwardCache
+getForwardCache = liftFLAMIO $ FLAMIO $ get
+
+canForwardTo :: MonadFLAMIO m => Principal -> m Bool
+canForwardTo s = do
+  dontfwdto <- liftFLAMIO $ FLAMIO $ asks (view _2)
+  return $ Set.notMember s dontfwdto
+
 searchFailedCache :: MonadFLAMIO m => (Principal, Principal) -> (Principal, Principal) -> m (Maybe (Principal, Assumptions))
 searchFailedCache (cur, clr) (p, q) = do
   cache <- liftFLAMIO getCache
-  h <- liftLIO $ gets $ view _2
-  strat <- liftLIO $ gets $ view _3
-  assumptions <- liftFLAMIO $ FLAMIO ask
-  let failedcache = POMap.takeWhileAntitone (`leq` Op (assumptions, strat, h)) (view failedCache cache)
-  return $ searchSurePOMapOp (cur, clr) (p, q) failedcache
+  h <- getH
+  strat <- liftLIO $ gets $ view _2
+  assumptions <- getAssumptions
+  useSocketsRPC $ \socks -> do
+    let failedcache = POMap.takeWhileAntitone (`leq` Op (assumptions, strat, h, socks)) (view failedCache cache)
+    return $ searchSurePOMapOp (cur, clr) (p, q) failedcache
   
 searchProvedCache :: MonadFLAMIO m => (Principal, Principal) -> (Principal, Principal) -> m (Maybe (Principal, Assumptions))
 searchProvedCache (cur, clr) (p, q) = do
   cache <- liftFLAMIO $ getCache
-  h <- liftLIO $ gets $ view _2
-  strat <- liftLIO $ gets $ view _3
-  assumptions <- liftFLAMIO $ FLAMIO ask
-  let provedcache = POMap.takeWhileAntitone (`leq` (assumptions, strat, h)) (view provedCache cache)
-  return $ searchSurePOMap (cur, clr) (p, q) provedcache
+  h <- getH
+  strat <- liftLIO $ gets $ view _2
+  assumptions <- getAssumptions
+  useSocketsRPC $ \socks -> do
+    let provedcache = POMap.takeWhileAntitone (`leq` (assumptions, strat, h, socks)) (view provedCache cache)
+    return $ searchSurePOMap (cur, clr) (p, q) provedcache
   
 data CacheSearchResult
   = ProvedResult !Principal !Assumptions
@@ -457,9 +519,9 @@ data CacheSearchResult
 searchPrunedCache :: MonadFLAMIO m => (Principal, Principal) -> (Principal, Principal) -> m (Maybe (ProgressCondition, Assumptions))
 searchPrunedCache (cur, clr) (p, q) = do
   cache <- liftFLAMIO getCache
-  h <- liftLIO $ gets $ view _2
-  strat <- liftLIO $ gets $ view _3
-  assumptions <- liftFLAMIO $ FLAMIO ask
+  h <- getH
+  strat <- liftLIO $ gets $ view _2
+  assumptions <- getAssumptions
   case Map.lookup assumptions (view prunedCache cache) of
     Just uc ->
       case Map.lookup (cur, clr) uc of
@@ -478,19 +540,27 @@ searchcache (cur, clr) (p, q) = do
     (_, _, Just (pc, a)) -> return $ Just $ PrunedResult pc a
     (_, _, _) -> return Nothing
 
-instance MonadLIO s l m => MonadLIO s l (AssumptionsT m) where
+instance MonadLIO l m => MonadLIO l (AssumptionsT m) where
   liftLIO = lift . liftLIO
   
 instance MonadTrans AssumptionsT where
-  lift = AssumptionsT . lift 
+  lift = AssumptionsT . lift . lift
+
+incrD :: MonadFLAMIO m => m ()
+incrD = liftFLAMIO $ FLAMIO $ lift $ modify $ over depth $ (+2) 
+
+decrD :: MonadFLAMIO m => m ()
+decrD = liftFLAMIO $ FLAMIO $ lift $ modify $ over depth $ (subtract 2)
+
+getDepth :: MonadFLAMIO m => m Int
+getDepth = liftFLAMIO $ FLAMIO $ lift $ gets (view depth)
 
 (.≽.) :: MonadFLAMIO m => Principal -> Principal -> m QueryResult
 p .≽. q = do
-  curLab <- liftLIO getLabel
-  clrLab <- liftLIO getClearance
-  x <- searchcache (curLab, clrLab) (p, q)
-  y <- liftFLAMIO $ FLAMIO $ ask
-  case x of
+  assumptions <- getAssumptions
+  curLab <- getLabel
+  clrLab <- getClearance
+  searchcache (curLab, clrLab) (p, q) >>= \case
     Just (ProvedResult cur' a) -> do
       liftLIO $ modify $ (_1 . cur) .~ cur'
       return $ Success a
@@ -500,10 +570,13 @@ p .≽. q = do
     Just (PrunedResult pc a) -> do
       return $ Pruned pc a
     Nothing -> do
-      update (curLab, clrLab) (p, q) (Pruned (ActsFor p q) Set.empty)
-      r <- (p .≽ q)
-      update (curLab, clrLab) (p, q) r
-      return r
+      d <- getDepth
+      if d < 10 then do
+        update (curLab, clrLab) (p, q) (Pruned (ActsFor p q) Set.empty)
+        r <- (p .≽ q)
+        update (curLab, clrLab) (p, q) r
+        return r
+      else return $ Failed Set.empty
 
 bot_ :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
 bot_ (_, (:⊥)) = return $ Success Set.empty
@@ -619,7 +692,7 @@ transitive :: Set ((J, J), Assumptions) -> Set ((J, J), Assumptions)
 transitive s
   | s == s' = s
   | otherwise = transitive s'
-  where s' = s `Set.union` Set.fromList [((a, c), ass1 `Set.union` ass2)
+  where s' = s `Set.union` Set.fromList [ ((a, c), ass1 `Set.union` ass2)
                                         | ((a, b), ass1) <- Set.toList s,
                                           ((b', c), ass2) <- Set.toList s,
                                           b == b']
@@ -631,32 +704,24 @@ transitive s
               ps <- sequence [Set.toList bs | M bs <- Set.toList ms]]
   where mkM = M . Set.singleton
 
-instance HasCache c m => HasCache c (StateT s m) where
-  getCache = StateT $ \s -> (,) <$> getCache <*> pure s
-  putCache c = StateT $ \s -> (,) <$> putCache c <*> pure s
-  
-instance HasCache c m => HasCache c (ReaderT r m) where
-  getCache = ReaderT $ const getCache
-  putCache = ReaderT . const . putCache
-  
-instance HasCache c m => HasCache c (AssumptionsT m) where
-  getCache = AssumptionsT $ getCache
-  putCache = AssumptionsT . putCache
-
 (⊳) :: MonadFLAMIO m => (Principal, Principal) -> FLAMIO a -> m a
-(p, q) ⊳ x = liftFLAMIO (FLAMIO (local (Set.insert (p, q)) (unFLAMIO x)))
+(p, q) ⊳ x = liftFLAMIO (FLAMIO (local (over _1 $ inserts [(p, q){-,
+                                                           ((p →), (q →)),
+                                                           ((p ←), (q ←))-}])
+                                  (unFLAMIO x)))
+  where inserts xs s = List.foldr Set.insert s xs
 
 del :: (MonadFLAMIO m) => (Principal, Principal) -> m QueryResult
 del (p, q) = do
-  h <- getState
+  h <- getH
   strat <- getStrategy
   clr <- getClearance
   let run [] = return (False, Set.empty)
       run (stratClr : strat) =
         let f lab = do
               l <- liftLIO getLabel
-              (b1, a1) <- (p, q) ⊳ (labelOf lab ⊔ l .⊑. clr) >>= lowerB'
-              (b2, a2) <- (p, q) ⊳ (labelOf lab .⊑. stratClr) >>= lowerB'
+              (b1, a1) <- incrD *> ((p, q) ⊳ (labelOf lab ⊔ l .⊑. clr) >>= lowerB') <* decrD
+              (b2, a2) <- incrD *> ((p, q) ⊳ (labelOf lab .⊑. stratClr) >>= lowerB') <* decrD
               case (b1, b2) of
                 (True, True) -> Just <$> ((,) <$> (p, q) ⊳ (unlabel lab) <*> pure ((a1 `Set.union` a2) \\ Set.singleton (p, q)))
                 _ -> return Nothing -- TODO: Should we record a1 and a2 here somehow?
@@ -665,55 +730,92 @@ del (p, q) = do
              (False, a) -> second (Set.union a) <$> run strat
   uncurry (flip liftB) <$> run (unStrategy strat)
 
-löb :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
-löb (p, q) = do
-  assumptions <- liftFLAMIO $ FLAMIO ask
+assump :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
+assump (p, q) = do
+  assumptions <- getAssumptions
   let x = Set.foldr' f Set.empty assumptions
   r <- uncurry (flip liftB) <$> reach (p, q) x
   return r
-  where
-    f (p, q) = Set.insert ((p, q), Set.singleton (p, q))
+  where f (p, q) = Set.insert ((p, q), Set.singleton (p, q))
 
 distrL :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
-distrL ((:→) (p1 :/\ p2), q) = ((p1 →) /\ (p2 →)) .≽. q
-distrL ((:→) (p1 :\/ p2), q) = ((p1 →) \/ (p2 →)) .≽. q
-distrL ((:←) (p1 :/\ p2), q) = ((p1 ←) /\ (p2 ←)) .≽. q
-distrL ((:←) (p1 :\/ p2), q) = ((p1 ←) \/ (p2 ←)) .≽. q
+distrL ((:→) (p1 :/\ p2), q) = incrD *> (((p1 →) /\ (p2 →)) .≽. q) <* decrD
+distrL ((:→) (p1 :\/ p2), q) = incrD *> (((p1 →) \/ (p2 →)) .≽. q) <* decrD
+distrL ((:←) (p1 :/\ p2), q) = incrD *> (((p1 ←) /\ (p2 ←)) .≽. q) <* decrD
+distrL ((:←) (p1 :\/ p2), q) = incrD *> (((p1 ←) \/ (p2 ←)) .≽. q) <* decrD
 distrL _ = return $ Failed Set.empty
 
 distrR :: MonadFLAMIO m => (Principal, Principal) -> m QueryResult
-distrR (p, (:→) (q1 :/\ q2)) = p .≽. ((q1 →) /\ (q2 →))
-distrR (p, (:→) (q1 :\/ q2)) = p .≽. ((q1 →) \/ (q2 →))
-distrR (p, (:←) (q1 :/\ q2)) = p .≽. ((q1 ←) /\ (q2 ←))
-distrR (p, (:←) (q1 :\/ q2)) = p .≽. ((q1 ←) \/ (q2 ←))
+distrR (p, (:→) (q1 :/\ q2)) = incrD *> (p .≽. ((q1 →) /\ (q2 →))) <* decrD
+distrR (p, (:→) (q1 :\/ q2)) = incrD *> (p .≽. ((q1 →) \/ (q2 →))) <* decrD
+distrR (p, (:←) (q1 :/\ q2)) = incrD *> (p .≽. ((q1 ←) /\ (q2 ←))) <* decrD
+distrR (p, (:←) (q1 :\/ q2)) = incrD *> (p .≽. ((q1 ←) \/ (q2 ←))) <* decrD
 distrR _ = return $ Failed Set.empty
 
 instance Binary s => Binary (Strategy s)
-  
-instance Binary Principal
+
+hasNames :: Principal -> Bool
+hasNames (:⊤) = False
+hasNames (:⊥) = False
+hasNames (p1 :/\ p2) = hasNames p1 || hasNames p2
+hasNames (p1 :\/ p2) = hasNames p1 || hasNames p2
+hasNames (p1 ::: p2) = hasNames p1 || hasNames p2
+hasNames (Name _) = True
+hasNames ((:→) p) = hasNames p
+hasNames ((:←) p) = hasNames p
+
+lookupForwardCache :: MonadFLAMIO m => Principal -> (Principal, Principal) -> m (Maybe Bool)
+lookupForwardCache n (p, q) = do
+  Map.lookup n <$> getForwardCache >>= \case
+    Just m -> return $ Map.lookup (p, q) m  
+    Nothing -> return Nothing
+
+updateForwardCache :: MonadFLAMIO m => Principal -> (Principal, Principal) -> Bool -> m ()
+updateForwardCache n (p, q) b = liftFLAMIO $ FLAMIO $ modify $ f
+  where f c = case Map.lookup n c of
+                Just m -> Map.insert n (Map.insert (p, q) b m) c
+                Nothing -> Map.singleton n (Map.singleton (p, q) b)
 
 forward :: forall m . MonadFLAMIO m => (Principal, Principal) -> m QueryResult
-forward (p, q) = do
-  l <- getLabel
-  (ns, a) <- runWriterT (lift getSocketsRPC >>=
-                    filterM (\(LSocketRPC (_, n)) -> do
-                                lift (n .≽. l >>= lowerB') >>= \case
-                                  (True, a) -> tell a >> return True
-                                  (False, a) -> tell a >> return False))
-  (^ a) <$> run ns
-  where
-    run :: [LSocketRPC] -> m QueryResult
-    run [] = return $ Failed Set.empty
-    run (LSocketRPC (s, n) : ns) = do
-      strat <- getStrategy
-      liftFLAMIO $ liftLIO $ liftIO $ send s (p, q, strat)
-      liftFLAMIO (liftLIO $ liftIO $ recv s) >>= \case
-        Just True -> return $ Success $ Set.empty
-        _ -> run ns
+forward (p, q)
+  | hasNames p || hasNames q = do
+    l <- getLabel
+    useSocketsRPC $ \socks -> do
+      ns <- mapMaybeM (\(s@(LSocketRPC (_, n))) -> do
+                          canForwardTo n >>= \case
+                            False -> return Nothing
+                            True -> do
+                              incrD *> ((p, q) ⊳ ((n →) .≽. (l →)) >>= lowerB') <* decrD >>= \case
+                                (True, a) -> return $ Just (s, a \\ Set.singleton (p, q))
+                                (False, _) -> return Nothing) socks
+      run ns
+  | otherwise = return $ Failed Set.empty
+    where
+      run :: [(LSocketRPC, Assumptions)] -> m QueryResult
+      run [] = return $ Failed Set.empty
+      run ((LSocketRPC (s, n), a) : ns) = do
+        lookupForwardCache n (p, q) >>= \case
+          Just b -> return $ liftB a b
+          Nothing -> do
+            strat <- getStrategy
+            clr <- getClearance
+            let ns' = List.map (\(LSocketRPC (_, p), _) -> p) ns
+            c <- liftFLAMIO getCache
+            liftFLAMIO $ liftLIO $ liftIO $ send s (p, q, strat, clr : ns' {-, toBinaryable c-})
+            liftFLAMIO (liftLIO $ liftIO $ recv s) >>= \case
+              Just True -> do
+                updateForwardCache n (p, q) True
+                return $ Success a
+              r -> do
+                updateForwardCache n (p, q) False
+                (^) <$> run ns <*> pure a
+
+lift' :: MonadFLAMIO m => IO a -> m a
+lift' = liftFLAMIO . liftLIO . liftIO
 
 (.≽) :: MonadFLAMIO m => Principal -> Principal -> m QueryResult
 p .≽ q =
-  löb (p, q) <|||>
+  assump (p, q) <|||>
   bot_ (p, q) <|||>
   top_ (p, q) <|||>
   refl (p, q) <|||>
@@ -731,15 +833,15 @@ p .≽ q =
   forward (p, q)
   
 (≽) :: (MonadFLAMIO m, ToLabel a Principal, ToLabel b Principal) => a -> b -> m Bool
-p ≽ q = runReaderT (unAssumptionsT ((normalize (p %) .≽. normalize (q %)) >>= lowerB)) Set.empty
+p ≽ q = runReaderT (evalStateT (unAssumptionsT ((normalize (p %) .≽. normalize (q %)) >>= lowerB)) Map.empty) (Set.empty, Set.empty)
 infix 6 ≽
 
 instance SemiLattice Principal where
   p .⊔. q = normalize (((p /\ q) →) /\ ((p \/ q) ←))
   p .⊓. q = normalize (((p \/ q) →) /\ ((p /\ q) ←))
 
-instance Label H Principal where
-  type C H Principal = MonadFLAMIO
+instance Label Principal where
+  type C Principal = MonadFLAMIO
   p ⊑ q = ((q →) /\ (p ←)) ≽ ((p →) /\ (q ←))
 
 (.⊑.) :: MonadFLAMIO m => Principal -> Principal -> m QueryResult
@@ -782,12 +884,12 @@ norm ((:←) p) =
 norm (p1 ::: p2) = owner (norm p1) (norm p2)
 
 reify :: JNF -> Principal
-reify (JNF c i) = ((:→) (reifyJ c)) :/\ ((:←) (reifyJ i))
+reify (JNF c i) = ((reifyJ c) →) :/\ ((reifyJ i) ←)
   where
  reifyJ :: J -> Principal
  reifyJ (J (listview -> [m])) = reifyM m
  reifyJ (J (setview -> Just (m, ms))) = reifyM m :/\ reifyJ (J ms)
-
+ 
  reifyM :: M -> Principal
  reifyM (M (listview -> [b])) = reifyBase b
  reifyM (M (setview -> Just (b, bs))) = reifyBase b :\/ reifyM (M bs)
@@ -971,10 +1073,14 @@ a ∨ b = (a %) :\/ (b %)
 infixr 7 ∨
   
 (→) :: (ToLabel a Principal) => a -> Principal
-(→) a = (:→) (a %)
+(→) a = case (a %) of
+          (:→) p -> (:→) p
+          p -> (:→) p
 
 (←) :: (ToLabel a Principal) => a -> Principal
-(←) a = (:←) (a %)
+(←) a = case (a %) of
+          (:←) p -> (:←) p
+          p -> (:←) p
 
 (.:) :: (ToLabel a Principal, ToLabel b Principal) => a -> b -> Principal
 a .: b = (a %) ::: (b %)
@@ -992,12 +1098,6 @@ bot = (:→) (:⊥) :/\ (:←) (:⊤)
 
 top :: Principal
 top = (:→) (:⊤) :/\ (:←) (:⊥)
-
-data LSocket a where
-  LSocket :: Binary a => (Net.Socket, Principal) -> LSocket a
-
-newtype LSocketRPC = LSocketRPC (Net.Socket, Principal)
-  deriving (Eq, Show)
 
 class RPCInvokable t
 
@@ -1017,14 +1117,15 @@ instance (IsArrow f ~ isArrow, Typeable f, Curryable' isArrow f) => Curryable f 
 data RPCInvokableExt = forall t a b . (RPCInvokable t, Typeable t, Curryable t) => RPCInvokableExt t
 
 data FLAMIOSt = FLAMIOSt { _cache :: Cache,
-                           _sockets :: [LSocketRPC],
+                           _sockets :: MVar [LSocketRPC],
                            _exports :: Map String RPCInvokableExt,
-                           _hPtr :: MVar H }
+                           _hPtr :: MVar H,
+                           _depth :: Int }
 
 cache :: Lens' FLAMIOSt Cache
 cache = lens _cache (\st c -> st { _cache = c })
 
-sockets :: Lens' FLAMIOSt [LSocketRPC]
+sockets :: Lens' FLAMIOSt (MVar [LSocketRPC])
 sockets = lens _sockets (\st s -> st { _sockets = s })
 
 exports :: Lens' FLAMIOSt (Map String RPCInvokableExt)
@@ -1032,6 +1133,14 @@ exports = lens _exports (\st e -> st { _exports = e })
 
 hPtr :: Lens' FLAMIOSt (MVar H)
 hPtr = lens _hPtr (\st h -> st { _hPtr = h })
+
+depth :: Lens' FLAMIOSt Int
+depth = lens _depth (\st d -> st { _depth = d })
+
+getH :: MonadFLAMIO m => m H
+getH = do
+  mvar <- getHPtr
+  liftFLAMIO $ liftLIO $ liftIO $ readMVar mvar
 
 insertInHPtr :: MonadFLAMIO m => Labeled Principal (Principal, Principal) -> m ()
 insertInHPtr lab = do
@@ -1045,33 +1154,41 @@ removeFromHPtr lab = do
   liftFLAMIO $ liftLIO $ liftIO $ modifyMVar_ h (return . H . Set.delete lab . unH)
   return ()
 
-putSocketRPC :: MonadFLAMIO m => LSocketRPC -> m ()
-putSocketRPC s =
-  liftFLAMIO $ FLAMIO $ modify $ over sockets $ (:) s
+getSocketsRPC :: MonadFLAMIO m => m (MVar [LSocketRPC])
+getSocketsRPC = liftFLAMIO $ FLAMIO $ lift $ gets (view sockets)
 
-getSocketsRPC :: MonadFLAMIO m => m [LSocketRPC]
-getSocketsRPC = liftFLAMIO $ FLAMIO $ gets (view sockets)
+useSocketsRPC :: MonadFLAMIO m => ([LSocketRPC] -> m a) -> m a
+useSocketsRPC f = do
+  mvar <- getSocketsRPC
+  socks <- liftFLAMIO $ liftLIO $ liftIO $ readMVar mvar
+  x <- f socks
+  return x
+
+putSocketRPC :: MonadFLAMIO m => LSocketRPC -> m ()
+putSocketRPC s = do
+  mvar <- getSocketsRPC
+  socks <- liftFLAMIO $ liftLIO $ liftIO $ takeMVar mvar
+  liftFLAMIO $ liftLIO $ liftIO $ putMVar mvar (s : socks)
+
 
 removeSocketRPC :: MonadFLAMIO m => LSocketRPC -> m ()
-removeSocketRPC s =
-  liftFLAMIO $ FLAMIO $ modify $ over sockets $ List.delete s
+removeSocketRPC s = do
+  mvar <- getSocketsRPC
+  socks <- liftFLAMIO $ liftLIO $ liftIO $ takeMVar mvar
+  liftFLAMIO $ liftLIO $ liftIO $ putMVar mvar (List.delete s socks)
 
 export :: (MonadFLAMIO m, RPCInvokable t, Curryable t) => String -> t -> m ()
-export s f = liftFLAMIO $ FLAMIO $ modify $ over exports $
+export s f = liftFLAMIO $ FLAMIO $ lift $ modify $ over exports $
                Map.insert s (RPCInvokableExt f)
 
 lookupRPC :: MonadFLAMIO m => String -> m (Maybe RPCInvokableExt)
-lookupRPC s = Map.lookup s <$> liftFLAMIO (FLAMIO (gets (view exports)))
+lookupRPC s = Map.lookup s <$> liftFLAMIO (FLAMIO $ lift (gets (view exports)))
 
 getHPtr :: MonadFLAMIO m => m (MVar H)
-getHPtr = liftFLAMIO $ FLAMIO $ gets (view hPtr)
+getHPtr = liftFLAMIO $ FLAMIO $ lift $ gets (view hPtr)
 
-instance MonadLIO H FLAM FLAMIO where
+instance MonadLIO FLAM FLAMIO where
   liftLIO = FLAMIO . liftLIO
-
-instance HasCache Cache FLAMIO where
-  getCache = FLAMIO $ gets (view cache)
-  putCache c = FLAMIO $ modify $ cache .~ c
 
 (∇) :: (ToLabel a Principal) => a -> Principal
 (∇) a = normalize $ (confidentiality p' ←) /\ (integrity p' ←)
@@ -1083,10 +1200,8 @@ addDelegate p q l = do
   lbl <- getLabel
   (,) <$> lbl ≽ (∇) q <*> (∇) (p →) ≽ (∇) (q →) >>= \case
     (True, True) -> do
-      h <- liftLIO getState
       lab <- label l (normalize (p %), normalize (q %))
       liftFLAMIO $ modifyCache $ prunedCache .~ Map.empty
-      liftLIO $ setState (H $ Set.insert lab (unH h))
       insertInHPtr lab
     (False, _) -> error $ "IFC violation (addDelegate 1): " ++ show lbl ++ " ≽ " ++ show ((∇) q)
     (_, False) -> error $ "IFC violation (addDelegate 2): " ++ show ((∇) (p →)) ++ " ≽ " ++ show ((∇) (q →))
@@ -1094,19 +1209,17 @@ addDelegate p q l = do
 removeDelegate :: (MonadFLAMIO m, ToLabel a Principal, ToLabel b Principal, ToLabel c Principal) =>
                   a -> b -> c -> m ()
 removeDelegate p q l = do
-  h <- liftLIO getState
   lab <- label l (normalize (p %), normalize (q %))
   liftFLAMIO $ modifyCache $ prunedCache .~ Map.empty
-  liftLIO $ setState (H $ Set.delete lab (unH h))
   removeFromHPtr lab
 
 withStrategy :: (MonadFLAMIO m, ToLabel b Principal) => [b] -> m a -> m a
 withStrategy newStrat m = do
   liftFLAMIO $ modifyCache $ prunedCache .~ Map.empty
-  oldStrat <- liftLIO $ gets $ view _3
-  liftLIO $ modify $ (_3 .~ Strategy (fmap (normalize . (%)) newStrat))
+  oldStrat <- liftLIO $ gets $ view _2
+  liftLIO $ modify $ (_2 .~ Strategy (fmap (normalize . (%)) newStrat))
   x <- m
-  liftLIO $ modify $ (_3 .~ oldStrat)
+  liftLIO $ modify $ (_2 .~ oldStrat)
   return x
 
 noStrategy :: Strategy Principal
@@ -1114,16 +1227,22 @@ noStrategy = Strategy []
 
 newScope :: (MonadFLAMIO m) => m a -> m a
 newScope m = do
-  h <- liftLIO getState
+  mvar <- getHPtr
+  h <- liftFLAMIO $ liftLIO $ liftIO $ readMVar mvar
   x <- m
-  liftLIO $ setState h
+  liftFLAMIO $ liftLIO $ liftIO $ tryTakeMVar mvar
+  liftFLAMIO $ liftLIO $ liftIO $ putMVar mvar h
   return x
 
-runFLAM :: FLAMIO a -> StateT (BoundedLabel FLAM, H, Strategy FLAM) IO a
-runFLAM m = do
-  h <- liftIO $ newMVar (H Set.empty)
-  unLIO $ evalStateT (runReaderT (unAssumptionsT $ unFLAMIO m) Set.empty)
-    (FLAMIOSt emptyCache [] Map.empty h)
+noForwardTo :: (MonadFLAMIO m) => Set Principal -> FLAMIO a -> m a
+noForwardTo dontfwdto x = liftFLAMIO (FLAMIO $ local (over _2 $ const dontfwdto) (unFLAMIO x))
+
+runFLAMWithCache :: Cache -> FLAMIO a -> MVar H -> MVar [LSocketRPC] -> StateT (BoundedLabel FLAM, Strategy FLAM) IO a
+runFLAMWithCache c m h socks = do
+  unLIO $ evalStateT (runReaderT (evalStateT (unAssumptionsT $ unFLAMIO m) Map.empty) (Set.empty, Set.empty)) (FLAMIOSt c socks Map.empty h 0)
+
+runFLAM :: FLAMIO a -> MVar H -> MVar [LSocketRPC] -> StateT (BoundedLabel FLAM, Strategy FLAM) IO a
+runFLAM m h socks = runFLAMWithCache emptyCache m h socks
 
 instance MonadFLAMIO FLAMIO where
   liftFLAMIO = id
@@ -1148,3 +1267,8 @@ instance MonadFix m => MonadFix (AssumptionsT m) where
   
 instance MonadFix FLAMIO where
   mfix f = FLAMIO $ mfix $ \a -> unFLAMIO (f a)
+
+forkFinally :: (ForkableMonad m, MonadMask m) => m a -> (Either SomeException a -> m ()) -> m ThreadId
+forkFinally action and_then =
+  mask $ \restore ->
+    forkIO $ try (restore action) >>= and_then

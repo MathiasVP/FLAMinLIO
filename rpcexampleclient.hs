@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE PostfixOperators #-}
@@ -10,71 +11,65 @@ import Lib.Network
 import Lib.RPC
 import Control.Monad.State
 import qualified Data.Set as Set
+import qualified Data.Map as Map
 import Control.Lens
 import Bank
 import Data.Dynamic.Binary
 import Data.Binary
+import Control.Concurrent.MVar
 
-asUser :: MonadFLAMIO m => User -> m () -> m ()
+asUser :: ToLabel a Principal => MonadFLAMIO m => a -> m () -> m ()
 asUser u m = do
   label <- getLabel
   clr <- getClearance
-  liftLIO $ modify $ _1 . clearance .~ (u %)
+  liftLIO $ modify $ _1 . clearance .~ (u →) ∧ ((⊥) ←)
   _ <- m
-  liftLIO $ modify $ _1 . clearance .~ (u %)
+  liftLIO $ modify $ _1 . clearance .~ clr
   liftLIO $ modify $ _1 . cur .~ label
 
 example :: FLAMIO ()
 example = do
-  connect ("127.0.0.1", "8000", (⊤), "8001") $ \socket -> do
-    asUser "Mathias" $ do
-      toLabeled "Mathias" $ do
-        rpc socket "create" ("Mathias" :: User) >>= \case
-          Just (ack :: Response) -> liftIO $ print ack
-          Nothing -> error "RPC failed!"
+  asUser ("Mathias") $ do
+    connect "127.0.0.1" "8000" "8001" $ \socket -> do
+      withStrategy [bot] $ do
+        clr <- getClearance
+        toLabeled clr $ do
+          rpc socket "create" (("Mathias" %) :: User) >>= \case
+            Just (ack :: Response) -> liftIO $ print ack
+            Nothing -> error "RPC failed!"
 
-      toLabeled "Mathias" $ do
-        rpc socket "open" ("Mathias" :: User) ("Savings" :: Account) >>= \case
-          Just (ack :: Response) -> liftIO $ print ack
-          Nothing -> error "RPC failed!"
+        
+        toLabeled clr $ do
+          rpc socket "open" (("Mathias" %) :: User) ("Savings" :: Account) >>= \case
+            Just (ack :: Response) -> liftIO $ print ack
+            Nothing -> error "RPC failed!"
 
-      toLabeled "Mathias" $ do
-        rpc socket "getBalance" ("Mathias" :: User) ("Savings" :: Account) >>= \case
-          Just (bal :: Response) -> liftIO $ print bal
-          Nothing -> error "RPC failed!"
+        toLabeled "Mathias" $ do
+          rpc socket "getBalance" (("Mathias" %) :: User) (("Savings" %) :: Account) >>= \case
+            Just (bal :: Response) -> liftIO $ print bal
+            Nothing -> error "RPC failed!"
 
-      newScope $ do
-        withStrategy ["Mathias"] $ do
+        newScope $ do
           addDelegate ("Chloe" ←) ("Mathias" ←) bot
           addDelegate ("Chloe" →) ("Mathias" →) bot
-
-          toLabeled "Mathias" $ do
-            rpc socket "transfer" ("Mathias" :: User) ("Savings" :: Account)
-                                  ("Chloe" :: User) ("Checking" :: Account)
+          toLabeled clr $ do
+            rpc socket "transfer" (("Mathias" %) :: User) ("Savings" :: Account)
+                                  (("Chloe" %) :: User) ("Checking" :: Account)
                                   (50 :: Int) >>= \case
               Just (p :: Response) -> liftIO $ print p
               Nothing -> error "RPC failed!"
-
-      toLabeled "Mathias" $ do
-        rpc socket "getBalance" ("Mathias" :: User) ("Savings" :: Account) >>= \case
-          Just (p :: Response) -> liftIO $ print p
-          Nothing -> error "RPC failed!"
-
-      liftIO getLine
-      return ()
+        
+        toLabeled "Mathias" $ do
+          rpc socket "getBalance" (("Mathias" %) :: User) ("Savings" :: Account) >>= \case
+            Just (p :: Response) -> liftIO $ print p
+            Nothing -> error "RPC failed!"
 
   liftIO getLine
   return ()
-  connect ("127.0.0.1", "8000", (⊤), "8001") $ \socket -> do
-    asUser "Chloe" $ do
-      toLabeled "Chloe" $ do
-        rpc socket "getBalance" ("Chloe" :: User) ("Checking" :: Account) >>= \case
-          Just (bal :: Response) -> liftIO $ print bal
-          Nothing -> error "RPC failed!"
-      liftIO getLine
-      return ()
 
 main :: IO ()
-main =
-  evalStateT (runFLAM example)
-    (BoundedLabel { _cur = bot, _clearance = top }, H Set.empty, noStrategy)
+main = do
+  h <- newMVar (H Set.empty)
+  socks <- newMVar []
+  evalStateT (runFLAM example h socks)
+    (BoundedLabel { _cur = bot, _clearance = top }, noStrategy)

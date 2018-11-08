@@ -13,12 +13,12 @@ import Data.Typeable
 
 import GHC.Generics
 
-send :: (MonadIO m, Binary a, Show a) => Net.Socket -> a -> m ()
+send :: (MonadIO m, Binary a) => Net.Socket -> a -> m ()
 send socket a =
   let d = encode a
   in Net.sendLazy socket (BL.append (encode (fromIntegral (BL.length d) :: Int)) d)
 
-recv :: forall m a . (MonadIO m, Binary a, Show a, Typeable a) => Net.Socket -> m (Maybe a)
+recv :: forall m a . (MonadIO m, Binary a, Typeable a) => Net.Socket -> m (Maybe a)
 recv socket = do
   Net.recv socket 8 >>= \case
     Just bs -> do

@@ -17,16 +17,17 @@ import Control.Monad.State
 import Control.Monad.Catch
 import GHC.Generics
 import qualified Data.Binary as Bin
+import Control.Concurrent.Forkable
 
-type User = String
+type User = Principal
 type Account = String
 type Balance = Int
 type BankData = Map User (Labeled Principal (Map Account Balance))
 
-newtype BankT m a = BankT { runBankT :: StateT BankData m a }
-  deriving (Functor, Applicative, Monad, MonadState BankData, MonadTrans)
+newtype BankT m a = BankT { runBankT :: StateT (MVar BankData) m a }
+  deriving (Functor, Applicative, Monad, MonadState (MVar BankData), MonadTrans)
 
-instance MonadLIO s l m => MonadLIO s l (BankT m) where
+instance MonadLIO l m => MonadLIO l (BankT m) where
   liftLIO = BankT . liftLIO
   
 instance MonadFLAMIO m => MonadFLAMIO (BankT m) where
@@ -53,11 +54,13 @@ instance MonadMask m => MonadMask (BankT m) where
     (\resource exitCase -> runBankT (release resource exitCase))
     (\resource -> runBankT (use resource))
 
-execBankT :: Monad m => BankT m a -> BankData -> m BankData
-execBankT = execStateT . runBankT
-
-uncurry3 :: (a -> b -> c -> d) -> (a, b, c) -> d
-uncurry3 f (a, b, c) = f a b c
+instance ForkableMonad m => ForkableMonad (BankT m) where
+  forkIO (BankT m) = BankT $ forkIO m
+  
+execBankT :: MonadIO m => BankT m a -> MVar BankData -> m BankData
+execBankT m mvar = do
+  _ <- runStateT (runBankT m) mvar
+  liftIO $ readMVar mvar
 
 data Request
   = GetBalance User Account
@@ -80,6 +83,7 @@ data Response
   | ProtocolError
   | NotSufficientFunds
   | UserAlreadyExists
+  | AccountAlreadyExists
   deriving (Show, Generic)
 
 instance Bin.Binary Response

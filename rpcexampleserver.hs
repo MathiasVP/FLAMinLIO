@@ -16,10 +16,12 @@ import Control.Lens
 import Bank
 import Data.Typeable
 import Data.Dynamic.Binary
+import Control.Concurrent
 
 getBalance :: User -> Account -> BankT FLAMIO Response
-getBalance u a =
-  Map.lookup u <$> get >>= \case
+getBalance u a = do
+  mvar <- get
+  Map.lookup u <$> liftIO (readMVar mvar) >>= \case
     Just lacc ->
       Map.lookup a <$> unlabel lacc >>= \case
         Just bal -> return $ Balance bal
@@ -27,42 +29,58 @@ getBalance u a =
     Nothing -> return $ NoSuchUser
 
 create :: User -> BankT FLAMIO Response
-create u =
-  Map.lookup u <$> get >>= \case
-    Just _ -> return UserAlreadyExists
+create u = do
+  mvar <- get
+  bankdata <- liftIO $ takeMVar mvar
+  case Map.lookup u bankdata of
+    Just _ -> do
+      liftIO $ putMVar mvar bankdata
+      return UserAlreadyExists
     Nothing -> do
       lacc <- label u Map.empty
-      modify $ Map.insert u lacc
+      liftIO $ putMVar mvar $ Map.insert u lacc bankdata
       return Ack
 
 open :: User -> Account -> BankT FLAMIO Response
-open u a =
-  Map.lookup u <$> get >>= \case
+open u a = do
+  mvar <- get
+  bankdata <- liftIO $ takeMVar mvar
+  case Map.lookup u bankdata of
     Just lacc -> do
       acc <- unlabel lacc
-      lacc' <- label u (Map.insert a 100 acc)
-      modify $ Map.insert u lacc'
-      return Ack
-    Nothing -> return NoSuchUser
+      case Map.lookup a acc of
+        Just _ -> do
+          liftIO $ putMVar mvar bankdata
+          return AccountAlreadyExists
+        Nothing -> do
+          lacc' <- label u (Map.insert a 100 acc)
+          liftIO $ putMVar mvar $ Map.insert u lacc' bankdata
+          return Ack
+    Nothing -> do
+      liftIO $ putMVar mvar bankdata
+      return NoSuchUser
 
 transfer :: User -> Account -> User -> Account -> Int -> BankT FLAMIO Response
 transfer uFrom aFrom uTo aTo n = do
-  Map.lookup uFrom <$> get >>= \case
+  mvar <- get
+  bankdata <- liftIO $ takeMVar mvar
+  case Map.lookup uFrom bankdata of
     Just laccFrom -> do
       accFrom <- unlabel laccFrom
       case Map.lookup aFrom accFrom of
         Just balFrom
           | balFrom >= n -> do
-              Map.lookup uTo <$> get >>= \case
+              case Map.lookup uTo bankdata of
                 Just laccTo -> do
                   clr <- getClearance
                   toLabeled clr $ do
                     accTo <- unlabel laccTo
                     accTo' <- label uTo $ Map.update (Just . (+ n)) aTo accTo
-                    modify $ Map.insert uTo accTo'
+                    liftIO $ putMVar mvar $ Map.insert uTo accTo' bankdata
                   toLabeled clr $ do
+                    bankdata <- liftIO $ takeMVar mvar
                     accFrom' <- label uFrom $ Map.update (Just . (subtract n)) aFrom accFrom
-                    modify $ Map.insert uFrom accFrom'
+                    liftIO $ putMVar mvar $ Map.insert uFrom accFrom' bankdata
                   return Ack
                 Nothing -> return NoSuchAccount
           | otherwise -> return NotSufficientFunds
@@ -78,10 +96,12 @@ repeatUntilM m =
 example :: BankT FLAMIO ()
 example = do
   toLabeled top $ do
-    create "Chloe"
-    open "Chloe" "Checking"
-
-  addDelegate ("Mathias" ←) ("Chloe" ←) bot
+    create ("Chloe" %)
+    open ("Chloe" %) "Checking"
+  toLabeled top $ do
+    withStrategy [bot] $ do
+      addDelegate ("Mathias" ←) ("Chloe" ←) bot
+      addDelegate ("Mathias" →) ("Chloe" →) bot
   
   export "getBalance" (exportable2 getBalance)
   export "create" (exportable1 create)
@@ -89,19 +109,26 @@ example = do
   export "transfer" (exportable5 transfer)
 
   forever $ do
-    serve ("127.0.0.1", "8000", (⊤), "8001") $ \socket -> do
-      toLabeled top $
+    serve "127.0.0.1" "8000" "8001" $ \socket -> do
+      toLabeled top $ do
         repeatUntilM $ do
-          withStrategy [top] $ do
+          withStrategy [bot] $ do
             recvRPC socket >>= \case
               Just (Just (s, args)) -> do
+                x <- get
+                y <- liftIO $ readMVar x
+                liftIO $ print y
                 lookupRPC s >>= \case
                   Just g -> invoke g args >>= sendRPCResult socket >> return True
-                  Nothing -> sendRPCResult socket (Nothing :: Maybe Dynamic) >> return True
+                  Nothing -> sendRPCResult socket Nothing >> return True
               Just Nothing -> return False
-              Nothing -> sendRPCResult socket (Nothing :: Maybe Dynamic) >> return True
-
+              Nothing -> sendRPCResult socket Nothing >> return True
+  return ()
+  
 main :: IO ()
-main =
-  evalStateT (runFLAM $ evalStateT (runBankT example) Map.empty)
-    (BoundedLabel { _cur = bot, _clearance = top }, H Set.empty, noStrategy)
+main = do
+  bankdata <- newMVar Map.empty
+  h <- newMVar (H Set.empty)
+  socks <- newMVar []
+  evalStateT (runFLAM (evalStateT (runBankT example) bankdata) h socks)
+    (BoundedLabel { _cur = bot, _clearance = top }, noStrategy)

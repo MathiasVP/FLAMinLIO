@@ -20,6 +20,9 @@ import Control.Monad.Catch
 import GHC.Generics
 import Data.Maybe
 import qualified Data.Binary as Bin
+import Control.Concurrent.Forkable
+import Control.Arrow
+import Prelude hiding (Left, Right)
 
 type FileName = String
 type FolderName = String
@@ -27,25 +30,26 @@ type FolderName = String
 data File a
   = Document FileName (Labeled Principal a)
   | Directory FolderName (Labeled Principal [File a])
-  | Root [File a]
   deriving Generic
 
-type Path a = (Maybe (String, Principal), [File a], [File a])
+data Direction = Up | Down | Left | Right
 
-type FileSystem a = (Maybe (File a), [Path a])
+nameOfFile :: File a -> String
+nameOfFile (Document name _) = name
+nameOfFile (Directory name _) = name
+
+type Path = [Direction]
 
 instance Bin.Binary a => Bin.Binary (File a)
 
 instance Show a => Show (File a) where
   show (Document s _) = "Document: " ++ s
   show (Directory s _) = "Directory: " ++ s
-  show (Root _) = "Root"
-  
 
-newtype FileSystemT b m a = FileSystemT { runFileSystemT :: StateT (FileSystem b) m a }
-  deriving (Functor, Applicative, Monad, MonadState (FileSystem b), MonadTrans)
+newtype FileSystemT a m b = FileSystemT { runFileSystemT :: StateT (MVar (File a), Path) m b }
+  deriving (Functor, Applicative, Monad, MonadState (MVar (File a), Path), MonadTrans)
 
-instance MonadLIO s l m => MonadLIO s l (FileSystemT a m) where
+instance MonadLIO l m => MonadLIO l (FileSystemT a m) where
   liftLIO = FileSystemT . liftLIO
   
 instance MonadFLAMIO m => MonadFLAMIO (FileSystemT a m) where
@@ -74,9 +78,12 @@ instance MonadMask m => MonadMask (FileSystemT a m) where
 
 instance MonadFix m => MonadFix (FileSystemT a m) where
   mfix f = FileSystemT $ mfix $ \a -> runFileSystemT (f a)
+  
+instance (ForkableMonad m) => ForkableMonad (FileSystemT a m) where
+  forkIO (FileSystemT m) = FileSystemT $ forkIO m
 
-evalFileSystemT :: Monad m => FileSystemT a m b -> m b
-evalFileSystemT fs = evalStateT (runFileSystemT fs) (Nothing, [(Nothing, [], [])])
+evalFileSystemT :: (Monad m, MonadIO m) => FileSystemT a m b -> MVar (File a) -> m b
+evalFileSystemT fs mvar = evalStateT (runFileSystemT fs) (mvar, [])
 
 modifyM :: MonadState s m => (s -> m s) -> m ()
 modifyM f = get >>= (f >=> put)
@@ -96,68 +103,79 @@ modify' f = do
   put s'
   return a
 
+follow' :: Path -> Maybe (File a) -> [File a] -> [File a] ->
+          [(Maybe (File a), [File a], [File a])] -> FileSystemT a FLAMIO (Maybe (File a))
+follow' (Up : path) _ leftOf rightOf ((mfile, leftOf', rightOf') : ups) =
+  follow' path mfile leftOf' rightOf' ups
+follow' (Down : path) (Just (Directory name content)) leftOf rightOf ups = do
+  content' <- unlabel content
+  case content' of
+    file : files -> follow' path (Just file) [] files ((Just (Directory name content), leftOf, rightOf) : ups)
+    [] -> follow' path Nothing [] [] ((Just (Directory name content), leftOf, rightOf) : ups)
+follow' (Left : path) mfile (file : leftOf) rightOf ups = do
+  let rightOf' = maybeToList mfile ++ rightOf
+  follow' path (Just file) leftOf rightOf' ups
+follow' (Left : path) mfile leftOf (file : rightOf) ups = do
+  let leftOf' = maybeToList mfile ++ leftOf
+  follow' path (Just file) leftOf' rightOf ups
+
+follow :: Path -> File a -> FileSystemT a FLAMIO (Maybe (File a))
+follow path file = follow' path (Just file) [] [] []
+
+addDirection :: Direction -> FileSystemT a FLAMIO Bool
+addDirection dir = do
+  (mvar, path) <- get
+  file <- liftIO $ readMVar mvar 
+  follow (path ++ [dir]) file >>= \case
+    Just _ -> do
+      put (mvar, path ++ [Down])
+      return True
+    Nothing -> return False
+  
+down :: () -> FileSystemT a FLAMIO Bool
+down () = addDirection Down
+
 up :: () -> FileSystemT a FLAMIO Bool
-up () =
-  modifyM' $ \(file, path) -> do
-    case path of
-      (Just (s, p), fs1, fs2):path -> do
-        fs <- label p (fs1 ++ maybeToList file ++ fs2)
-        return ((Just (Directory s fs), path), True)
-      (Nothing, fs1, fs2):path -> do
-        let fs = fs1 ++ maybeToList file ++ fs2
-        return ((Just (Root fs), path), True)
-      _ -> return ((file, path), False)
+up () = addDirection Up
 
 left :: () -> FileSystemT a FLAMIO Bool
-left () =
-  modify' $ \(file, path) ->
-    case path of
-      (msp, f:fs1, fs2):path ->
-        ((Just f, (msp, fs1, maybeToList file ++ fs2):path), True)
-      _ -> ((file, path), False)
+left () = addDirection Left
 
 right :: () -> FileSystemT a FLAMIO Bool
-right () =
-  modify' $ \(file, path) ->
-  case path of
-    (msp, fs1, f:fs2):path ->
-      ((Just f, (msp, maybeToList file ++ fs1, fs2):path), True)
-    _ -> ((file, path), False)
-
-down :: () -> FileSystemT a FLAMIO Bool
-down () = do
-  modifyM' $ \(file, path) ->
-    case file of
-      Just (Document {}) -> return ((file, path), False)
-      Just (Directory s fs) -> do
-        fs' <- unlabel fs
-        case fs' of
-          [] -> return ((Nothing, (Just (s, labelOf fs), [], fs'):path), True)
-          f:fs'' -> return ((Just f, (Just (s, labelOf fs), [], fs''):path), True)
-      Just (Root fs) ->
-        case fs of
-          [] -> return ((Nothing, (Nothing, [], fs):path), True)
-          f:fs' -> return ((Just f, (Nothing, [], fs'):path), True)
+right () = addDirection Right
 
 ls :: () -> FileSystemT a FLAMIO (Maybe (File a))
-ls () = gets fst
+ls () = do
+  (mvar, path) <- get
+  file <- liftIO $ readMVar mvar
+  follow path file
 
+{-
 cat :: () -> FileSystemT a FLAMIO (Maybe a)
-cat () = getsM $ \(f, _) ->
-                case f of
-                  Just (Document _ lc) -> Just <$> unlabel lc
-                  _ -> return Nothing
+cat () = getsM $ \mvar -> do
+           (f, _) <- liftIO $ readMVar mvar
+           case f of
+             Just (Document _ lc) -> Just <$> unlabel lc
+             _ -> return Nothing
 
 write :: a -> FileSystemT a FLAMIO Bool
-write a =
-  modifyM' $ \(file, path) ->
-  case file of
-    Just (Directory {}) -> return ((file, path), False)
-    Just (Root {}) -> return ((file, path), False)
-    Just (Document s d) -> do
-      a' <- label (labelOf d) a
-      return ((Just (Document s a'), path), True)
-    _ -> return ((file, path), False)
+write a = do
+  modifyM' $ \mvar -> do
+    (file, path) <- liftIO $ takeMVar mvar
+    case file of
+      Just (Directory {}) -> do
+        liftIO $ putMVar mvar (file, path)
+        return (mvar, False)
+      Just (Root {}) -> do
+        liftIO $ putMVar mvar (file, path)
+        return (mvar, False)
+      Just (Document s d) -> do
+        a' <- label (labelOf d) a
+        liftIO $ putMVar mvar (Just (Document s a'), path) 
+        return (mvar, True)
+      _ -> do
+        liftIO $ putMVar mvar (file, path)
+        return (mvar, False)
 
 append :: Monoid a => a -> FileSystemT a FLAMIO Bool
 append b =
@@ -167,16 +185,22 @@ append b =
 
 touch :: (ToLabel q Principal, Monoid a) => q -> FileName -> FileSystemT a FLAMIO Bool
 touch q s = do
-  modifyM' $ \case
-    (file, (msp, fs1, fs2):path) -> do
-      content <- label q mempty
-      return ((Just (Document s content), (msp, maybeToList file ++ fs1, fs2):path), True)
-    (mfile, path) -> return ((mfile, path), False)
+  modifyM' $ \(mvar, path) -> do
+    liftIO (takeMVar mvar) >>= \case
+      Directory name content -> do
+        content <- label q mempty
+        liftIO $ putMVar mvar (Just (Document s content), (msp, maybeToList file ++ fs1, fs2):path) 
+        return (mvar, True)
 
 mkdir :: (ToLabel q Principal, Monoid a) => q -> FileName -> FileSystemT a FLAMIO Bool
 mkdir q s = do
-  modifyM' $ \case
-    (file, (msp, fs1, fs2):path) -> do
-      content <- label q []
-      return ((Just (Directory s content), (msp, maybeToList file ++ fs1, fs2):path), True)
-    (mfile, path) -> return ((mfile, path), False)
+  modifyM' $ \mvar -> do
+    liftIO (takeMVar mvar) >>= \case
+      (file, (msp, fs1, fs2):path) -> do
+        content <- label q []
+        liftIO $ putMVar mvar (Just (Directory s content), (msp, maybeToList file ++ fs1, fs2):path)
+        return (mvar, True)
+      (mfile, path) -> do
+        liftIO $ putMVar mvar (mfile, path)
+        return (mvar, False)
+-}

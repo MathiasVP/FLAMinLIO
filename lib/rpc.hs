@@ -62,7 +62,7 @@ recvRPC (LSocketRPC (s, name)) = recv s
 invoke :: (MonadFLAMIO m, Typeable m) => RPCInvokableExt -> [Dynamic] -> m (Maybe Dynamic)
 invoke (RPCInvokableExt f) xs = c f xs
 
-sendRPCResult :: (MonadIO m, MonadMask m, MonadFLAMIO m, Binary a, Show a) => LSocketRPC -> Maybe a -> m ()
+sendRPCResult :: (MonadIO m, MonadMask m, MonadFLAMIO m) => LSocketRPC -> Maybe Dynamic -> m ()
 sendRPCResult (LSocketRPC (s, name)) ma = do
   cur <- getLabel
   lma <- label cur ma
