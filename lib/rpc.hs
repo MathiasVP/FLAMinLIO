@@ -34,10 +34,10 @@ instance {-# Overlaps #-} (MonadFLAMIO m, Binary a) => RPCInvokable (m a)
 instance {-# Overlaps #-} (Binary a, RPCInvokable r) => RPCInvokable (a -> r)
 
 class RPCType a where
-  rpc :: (Binary b, Typeable b) => LSocketRPC -> String -> b -> a
+  rpc :: (Binary b, Typeable b) => LSocket -> String -> b -> a
 
 class RPCType' a where
-  rpc' :: (Binary b, Typeable b) => LSocketRPC -> [Dynamic] -> String -> b -> a
+  rpc' :: (Binary b, Typeable b) => LSocket -> [Dynamic] -> String -> b -> a
   
 instance RPCType' a => RPCType a where
   rpc socket f args = rpc' socket [] f args
@@ -46,9 +46,9 @@ instance (Typeable a, Binary a, RPCType' r) => RPCType' (a -> r) where
   rpc' socket args f arg1 = \arg2 -> rpc' socket (toDyn arg1 : args) f arg2
 
 instance (Binary a, Typeable a) => RPCType' (FLAMIO (Maybe a)) where
-  rpc' (LSocketRPC (s, name)) args f arg = do
-    liftIO $ send s (Just (f, List.reverse (toDyn arg : args)))
-    liftIO (recv s) >>= \case
+  rpc' s args f arg = do
+    liftIO $ send (sendChan s) (Just (f, List.reverse (toDyn arg : args))) RPCCall
+    liftIO (recv (recvRPCRetChan s)) >>= \case
       Just (lma :: Labeled Principal (Maybe Dynamic)) -> do
         ma <- unlabel lma
         case ma of
@@ -56,17 +56,17 @@ instance (Binary a, Typeable a) => RPCType' (FLAMIO (Maybe a)) where
           Nothing -> return Nothing
       Nothing -> return Nothing
 
-recvRPC :: forall m a . (MonadIO m, MonadMask m, MonadFLAMIO m) => LSocketRPC -> m (Maybe (Maybe (String, [Dynamic])))
-recvRPC (LSocketRPC (s, name)) = recv s
+recvRPC :: forall m a . (MonadIO m, MonadMask m, MonadFLAMIO m) => LSocket -> m (Maybe (Maybe (String, [Dynamic])))
+recvRPC s = recv (recvRPCCallChan s)
 
 invoke :: (MonadFLAMIO m, Typeable m) => RPCInvokableExt -> [Dynamic] -> m (Maybe Dynamic)
 invoke (RPCInvokableExt f) xs = c f xs
 
-sendRPCResult :: (MonadIO m, MonadMask m, MonadFLAMIO m) => LSocketRPC -> Maybe Dynamic -> m ()
-sendRPCResult (LSocketRPC (s, name)) ma = do
+sendRPCResult :: (MonadIO m, MonadMask m, MonadFLAMIO m) => LSocket -> Maybe Dynamic -> m ()
+sendRPCResult s ma = do
   cur <- getLabel
   lma <- label cur ma
-  send s lma
+  send (sendChan s) lma RPCReturn
 
 instance (Typeable a) => Curryable' 'False a where
   c' _ a [] = do
