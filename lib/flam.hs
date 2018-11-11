@@ -187,6 +187,7 @@ type IP = String
 type Port = String
 
 data LSocket = LSocket { sendChan :: Chan BL.ByteString
+                       , recvConnChan :: Chan BL.ByteString
                        , recvRPCCallChan :: Chan BL.ByteString
                        , recvRPCRetChan :: Chan BL.ByteString
                        , recvFwdQueryChan :: Chan BL.ByteString
@@ -798,14 +799,14 @@ forward (p, q)
           Nothing -> do
             strat <- getStrategy
             clr <- getClearance
-            let ns' = List.map (\(s, _) -> channelLabel s) ns
+            let ns' = List.map (channelLabel . fst) ns
             liftFLAMIO $ liftLIO $ liftIO $ send (sendChan s) (p, q, strat, clr : ns') FwdQuery
             liftFLAMIO (liftLIO $ liftIO $ recv (recvFwdResChan s)) >>= \case
               Just True -> do
-                --updateForwardCache n (p, q) True
+                updateForwardCache n (p, q) True
                 return $ Success a
               r -> do
-                --updateForwardCache n (p, q) False
+                updateForwardCache n (p, q) False
                 (^) <$> run ns <*> pure a
 
 (.≽) :: MonadFLAMIO m => Principal -> Principal -> m QueryResult

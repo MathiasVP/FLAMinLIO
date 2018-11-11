@@ -32,8 +32,8 @@ example = do
   export "vote"       $ exportable1 (vote :: Labeled Principal String -> JukeBoxT FLAMIO Bool)
   export "candidates" $ exportable1 (const candidates :: Int ->
                           JukeBoxT FLAMIO (Map String (Set (Labeled Principal Principal))))
-  export "play"       $ exportable1 (const play :: Int -> JukeBoxT FLAMIO Bool)
-  
+  export "play"       $ exportable1 (const play :: Int -> JukeBoxT FLAMIO String)
+
   serve "127.0.0.1" "8000" $ \socket -> do
     forever $
       toLabeled top $

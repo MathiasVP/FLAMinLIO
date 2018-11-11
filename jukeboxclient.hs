@@ -35,12 +35,46 @@ example = do
       addDelegate ("J" ←) ("M" ←) lbl
       addDelegate ("J" →) ("M" →) lbl
       song <- label ("M" →) "Taylor Swift - Shake it Off"
-      liftIO getLine
       connect "127.0.0.1" "8000" $ \socket -> do
         rpc socket "vote" song >>= \case
           Just (b :: Bool) -> liftIO $ putStrLn "Voted for song"
           Nothing -> liftIO $ putStrLn "RPC error!"
+      liftIO getLine
+      return ()
 
+  lbl <- getLabel
+  withStrategy [lbl] $ do
+    asUser "I" $ do
+      addDelegate ("J" ←) ("I" ←) lbl
+      addDelegate ("J" →) ("I" →) lbl
+      song <- label ("I" →) "Taylor Swift - Shake it Off"
+      connect "127.0.0.1" "8000" $ \socket -> do
+        rpc socket "vote" song >>= \case
+          Just (b :: Bool) -> liftIO $ putStrLn "Voted for song"
+          Nothing -> liftIO $ putStrLn "RPC error!"
+      liftIO getLine
+      return ()
+
+  lbl <- getLabel
+  withStrategy [lbl] $ do
+    asUser "F" $ do
+      addDelegate ("J" ←) ("F" ←) lbl
+      addDelegate ("J" →) ("F" →) lbl
+      song <- label ("F" →) "Linkin Park - In the End"
+      connect "127.0.0.1" "8000" $ \socket -> do
+        rpc socket "vote" song >>= \case
+          Just (b :: Bool) -> liftIO $ putStrLn "Voted for song"
+          Nothing -> liftIO $ putStrLn "RPC error!"
+      liftIO getLine
+      return ()
+
+  lbl <- getLabel
+  withStrategy [lbl] $ do
+    asUser "M" $ do
+      connect "127.0.0.1" "8000" $ \socket -> do
+        rpc socket "play" (0 :: Int) >>= \case
+          Just (s :: String) -> liftIO $ putStrLn $ "Playing song: " ++ show s
+          Nothing -> liftIO $ putStrLn "RPC error!"
       liftIO getLine
       return ()
 

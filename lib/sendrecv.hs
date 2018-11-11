@@ -22,6 +22,7 @@ data MsgType
   | RPCReturn
   | FwdQuery
   | FwdResponse
+  | NewConn
   deriving (Generic)
 
 instance Binary MsgType

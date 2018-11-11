@@ -59,16 +59,14 @@ instance ForkableMonad m => ForkableMonad (JukeBoxT m) where
 vote :: MonadFLAMIO m => Labeled Principal String -> JukeBoxT m Bool
 vote ls = do
   let p = labelOf ls
-  liftFLAMIO $ liftIO $ putStrLn "Unlabeling"
   s <- unlabel ls
-  liftFLAMIO $ liftIO $ putStrLn "Done"
   mvar <- get
   (curSong, songs) <- liftFLAMIO $ liftIO $ takeMVar mvar
   lp <- label (("J" →) ∧ ((⊥) ←)) p
   let songs' = case Map.lookup s songs of
                  Just votes -> Map.insert s (Set.insert lp votes) songs
                  Nothing -> Map.insert s (Set.singleton lp) songs
-  liftFLAMIO $ liftIO $ putMVar mvar (curSong, songs)
+  liftFLAMIO $ liftIO $ putMVar mvar (curSong, songs')
   return True
 
 candidates :: MonadFLAMIO m =>
@@ -78,11 +76,10 @@ candidates = do
   (_, songs) <- liftFLAMIO $ liftIO $ readMVar mvar
   return songs
 
-play :: MonadFLAMIO m => JukeBoxT m Bool
+play :: MonadFLAMIO m => JukeBoxT m String
 play = do
   mvar <- get
   (_, songs) <- liftFLAMIO $ liftIO $ takeMVar mvar
-  songs' <- mapM (mapMOf _2 $ mapM unlabel . Set.toList) (Map.toList songs)
-  let (song, _) = List.maximumBy (comparing (over _2 List.length)) songs'
+  let (song, _) = List.maximumBy (\(_, ps) (_, qs) -> compare (Set.size ps) (Set.size qs)) (Map.toList songs)
   liftFLAMIO $ liftIO $ putMVar mvar (Just song, Map.delete song songs)
-  return True
+  return song
