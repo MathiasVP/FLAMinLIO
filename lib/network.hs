@@ -86,33 +86,37 @@ acceptFork lsock k = mask $ \restore -> do
 
 sendHandler :: MonadIO m => NS.Socket -> Chan BL.ByteString -> m ()
 sendHandler sock chan =
-  forever $ do
-    bs <- liftIO $ readChan chan
-    Net.sendLazy sock bs
+  liftIO $
+    catch (forever $ do
+              bs <- liftIO $ readChan chan
+              Net.sendLazy sock bs)
+    (\(e :: SomeException) -> return ())
 
 recvHandler :: MonadIO m => NS.Socket -> (Chan BL.ByteString, Chan BL.ByteString, Chan BL.ByteString, Chan BL.ByteString) -> m ()
 recvHandler sock (chanRecvRPCCall, chanRecvRPCRet, chanRecvFwdQuery, chanRecvFwdRes) =
-  forever $ do
-    Net.recv sock 1 >>= \case
-      Just bs -> do
-        case decodeOrFail (BL.fromStrict bs) of
-          Left _ -> return ()
-          Right (_, _, typ :: MsgType) ->
-            Net.recv sock 8 >>= \case
+  liftIO $
+    catch (forever $
+            Net.recv sock 1 >>= \case
               Just bs -> do
                 case decodeOrFail (BL.fromStrict bs) of
-                  Left (_, _, s) -> return ()
-                  Right (_, _, len :: Int) -> do
-                    Net.recv sock len >>= \case
-                      Just bs' -> do
-                        liftIO $ case typ of
-                          RPCCall -> writeChan chanRecvRPCCall (BL.fromStrict bs')
-                          RPCReturn -> writeChan chanRecvRPCRet (BL.fromStrict bs')
-                          FwdQuery -> writeChan chanRecvFwdQuery (BL.fromStrict bs')
-                          FwdResponse -> writeChan chanRecvFwdRes (BL.fromStrict bs')
+                  Left _ -> return ()
+                  Right (_, _, typ :: MsgType) ->
+                    Net.recv sock 8 >>= \case
+                      Just bs -> do
+                        case decodeOrFail (BL.fromStrict bs) of
+                          Left (_, _, s) -> return ()
+                          Right (_, _, len :: Int) -> do
+                            Net.recv sock len >>= \case
+                              Just bs' -> do
+                                liftIO $ case typ of
+                                  RPCCall -> writeChan chanRecvRPCCall (BL.fromStrict bs')
+                                  RPCReturn -> writeChan chanRecvRPCRet (BL.fromStrict bs')
+                                  FwdQuery -> writeChan chanRecvFwdQuery (BL.fromStrict bs')
+                                  FwdResponse -> writeChan chanRecvFwdRes (BL.fromStrict bs')
+                              Nothing -> return ()
                       Nothing -> return ()
-              Nothing -> return ()
-      Nothing -> return ()
+              Nothing -> return ())
+      (\(e :: SomeException) -> return ())
 
 serve :: (MonadIO m, ForkableMonad m, MonadMask m, MonadFLAMIO m) => IP -> Port -> (LSocket -> m r) -> m ()
 serve ip port f = do
@@ -124,8 +128,8 @@ serve ip port f = do
   Net.listen (Net.Host ip) port (\(socket, _) -> do
     forever $ do
       acceptFork socket $ \(socket', _) -> do
-        forkIO $ sendHandler socket' chanSend
-        forkIO $ recvHandler socket' (chanRecvRPCCall, chanRecvRPCRet, chanRecvFwdQuery, chanRecvFwdRes)
+        tidSend <- forkIO $ sendHandler socket' chanSend
+        tidRecv <- forkIO $ recvHandler socket' (chanRecvRPCCall, chanRecvRPCRet, chanRecvFwdQuery, chanRecvFwdRes)
       
         clientPrinc <- recv chanRecvRPCCall >>= \case
           Just (p :: Principal) -> return p
@@ -140,10 +144,12 @@ serve ip port f = do
         lbl <- getLabel
         clr <- getClearance
         tid <- liftFLAMIO $ liftIO $ forkIO (waitForQuery chanSend chanRecvFwdQuery lbl clr h socks)
-        liftIO $ threadDelay 1000000
         f lfwdsocket
         removeSocket lfwdsocket
-        liftFLAMIO $ liftLIO $ liftIO $ killThread tid)
+        liftFLAMIO $ liftLIO $ liftIO $ do
+          killThread tid
+          killThread tidRecv
+          killThread tidSend)
  
 connect :: (ForkableMonad m, MonadIO m, MonadMask m, MonadFLAMIO m) => IP -> Port -> (LSocket -> m r) -> m ()
 connect ip port f = do
@@ -154,8 +160,8 @@ connect ip port f = do
     chanRecvFwdQuery <- liftIO newChan
     chanRecvFwdRes <- liftIO newChan
 
-    forkIO $ sendHandler socket chanSend
-    forkIO $ recvHandler socket (chanRecvRPCCall, chanRecvRPCRet, chanRecvFwdQuery, chanRecvFwdRes)
+    tidSend <- forkIO $ sendHandler socket chanSend
+    tidRecv <- forkIO $ recvHandler socket (chanRecvRPCCall, chanRecvRPCRet, chanRecvFwdQuery, chanRecvFwdRes)
 
     clr <- liftFLAMIO getClearance
     send chanSend clr RPCCall
@@ -172,8 +178,10 @@ connect ip port f = do
              (waitForQuery chanSend chanRecvFwdQuery lbl clr h socks)
     f lfwdsocket
     removeSocket lfwdsocket
-    liftFLAMIO $ liftLIO $ liftIO $ killThread tid
-    send chanSend (Nothing :: Maybe (String, [Dynamic])) RPCCall)
+    liftFLAMIO $ liftLIO $ liftIO $ do
+      killThread tid
+      killThread tidRecv
+      killThread tidSend)
 
 instance MonadThrow m => MonadThrow (AssumptionsT m) where
   throwM = AssumptionsT . throwM
