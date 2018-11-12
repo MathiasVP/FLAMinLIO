@@ -165,15 +165,10 @@ toLabeled c m = do
   liftLIO $ modify $ (_1 .~ l')
   label c res
 
-toLabeled_ :: forall l m c a . (MonadLIO l m, Label l, C l m, ToLabel c l) => c -> m a -> m ()
-toLabeled_ c m = do
-  l' <- liftLIO $ gets $ view _1
-  res <- m
-  l'' <- liftLIO $ gets $ view $ _1 . cur
-  b <- l'' ⊑ c
-  unless b $ do
-    fail ("IFC violation (toLabeled_): " ++ show l'' ++ " ⊑ " ++ show ((%) c :: l))
-  liftLIO $ modify $ (_1 .~ l')
+lFmap :: forall l m a b . (MonadLIO l m, Label l, C l m) => Labeled l a -> (a -> b) -> m (Labeled l b)
+lFmap (Labeled l v) f = do
+  cur <- getLabel
+  label (l ⊔ cur :: l) (f v)
 
 getStrategy :: (MonadLIO l m, Label l, C l m) => m (Strategy l)
 getStrategy = liftLIO $ gets $ view _2

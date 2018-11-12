@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE PostfixOperators #-}
 
-module JukeBoxServer where
+module BankServer where
 
 import Lib.FLAM
 import Lib.LIO
@@ -14,7 +14,7 @@ import qualified Data.List as List
 import qualified Data.Map as Map
 import Data.Map(Map)
 import Data.Set(Set)
-import JukeBox
+import Bank
 import Data.Typeable
 import Data.Dynamic.Binary
 import Prelude hiding (read)
@@ -27,13 +27,13 @@ repeatUntilM m =
     True -> repeatUntilM m
     False -> return ()
 
-example :: JukeBoxT FLAMIO ()
+example :: BankT FLAMIO ()
 example = do
-  export "vote"       $ exportable1 (vote :: Labeled Principal String -> JukeBoxT FLAMIO Bool)
-  export "candidates" $ exportable1 (const candidates :: Int ->
-                          JukeBoxT FLAMIO (Map String (Set (Labeled Principal Principal))))
-  export "play"       $ exportable1 (const play :: Int -> JukeBoxT FLAMIO String)
-
+  export "login"   $ exportable2 (login :: String -> String -> BankT FLAMIO (Labeled Principal Principal))
+  export "balance" $ exportable2 (balance :: Labeled Principal Principal -> String ->
+                                             BankT FLAMIO (Maybe Int))
+  export "transfer" $ exportable4 (transfer :: Labeled Principal Principal -> String -> String -> Int -> BankT FLAMIO Bool)
+  
   serve "127.0.0.1" "8000" $ \socket ->
     forever $
       toLabeled top $
@@ -49,5 +49,7 @@ example = do
 
 main :: IO ()
 main = do
-  st <- newMVar (Nothing, Map.empty)
-  runFLAM "J" $ evalJukeBoxT example st
+  st <- newMVar (Map.fromList [("Alice", Labeled ("Alice" →) 50),
+                               ("Bob", Labeled ("Bob" →) 50)])
+  b <- runFLAM "B" $ execBankT example st
+  return ()
