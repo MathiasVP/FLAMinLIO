@@ -30,17 +30,14 @@ example :: FLAMIO ()
 example = do
   asUser "Bob" $ do
     withStrategy [bot] $ do
-      addDelegate ("B" ←) ("Bob" ←) bot
       addDelegate ("B" →) ("Bob" →) bot
 
   withStrategy [bot] $ do
     asUser "Alice" $ do
       connect "127.0.0.1" "8000" $ \socket -> do
         withStrategy [bot] $ do
-          addDelegate ("B" ←) ("Alice" ←) bot
           addDelegate ("B" →) ("Alice" →) bot
 
-          addDelegate ("Bob" ←) ("Alice" ←) bot
           addDelegate ("Bob" →) ("Alice" →) bot
         rpc socket "login" "Alice" "password" >>= \case
           Just (tok :: Labeled Principal Principal) -> do

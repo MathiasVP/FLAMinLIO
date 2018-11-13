@@ -92,14 +92,21 @@ transfer tok sFrom sTo n = do
           if nFrom >= n then
             case Map.lookup sTo b of
               Just lnTo -> do
-                lnTo' <- lFmap lnTo (+ n)
-                liftFLAMIO $ liftIO $ putMVar mvar $
-                  Map.insert sTo lnTo' b
+                clr <- getClearance
+                toLabeled clr $ do
+                  nTo <- unlabel lnTo
+                  lnTo' <- newScope $ do
+                             lbl <- getLabel
+                             addDelegate (sTo →) ("B" →) lbl
+                             label sTo (nTo + n)
+                  liftFLAMIO $ liftIO $ putMVar mvar $
+                    Map.insert sTo lnTo' b
 
-                b' <- liftFLAMIO $ liftIO $ readMVar mvar
-                lnFrom' <- lFmap lnFrom (subtract n)
-                liftFLAMIO $ liftIO $ putMVar mvar $
-                  Map.insert sFrom lnFrom' b'
+                toLabeled clr $ do
+                  b' <- liftFLAMIO $ liftIO $ readMVar mvar
+                  lnFrom' <- label sFrom (nFrom - n)
+                  liftFLAMIO $ liftIO $ putMVar mvar $
+                    Map.insert sFrom lnFrom' b'
                 return True
           else return False
         Nothing -> return False

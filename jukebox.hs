@@ -59,10 +59,10 @@ instance ForkableMonad m => ForkableMonad (JukeBoxT m) where
 vote :: MonadFLAMIO m => Labeled Principal String -> JukeBoxT m Bool
 vote ls = do
   let p = labelOf ls
+  lp <- label "J" p
   s <- unlabel ls
   mvar <- get
   (curSong, songs) <- liftFLAMIO $ liftIO $ takeMVar mvar
-  lp <- label (("J" →) ∧ ((⊥) ←)) p
   let songs' = case Map.lookup s songs of
                  Just votes -> Map.insert s (Set.insert lp votes) songs
                  Nothing -> Map.insert s (Set.singleton lp) songs

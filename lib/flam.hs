@@ -547,10 +547,10 @@ instance MonadTrans AssumptionsT where
   lift = AssumptionsT . lift . lift
 
 incrD :: MonadFLAMIO m => m ()
-incrD = liftFLAMIO $ FLAMIO $ lift $ modify $ over depth $ (+2) 
+incrD = liftFLAMIO $ FLAMIO $ lift $ modify $ over depth $ (+1)
 
 decrD :: MonadFLAMIO m => m ()
-decrD = liftFLAMIO $ FLAMIO $ lift $ modify $ over depth $ (subtract 2)
+decrD = liftFLAMIO $ FLAMIO $ lift $ modify $ over depth $ (subtract 1)
 
 getDepth :: MonadFLAMIO m => m Int
 getDepth = liftFLAMIO $ FLAMIO $ lift $ gets (view depth)
@@ -571,7 +571,7 @@ p .≽. q = do
       return $ Pruned pc a
     Nothing -> do
       d <- getDepth
-      if d < 10 then do
+      if d < 5 then do
         update (curLab, clrLab) (p, q) (Pruned (ActsFor p q) Set.empty)
         r <- (p .≽ q)
         update (curLab, clrLab) (p, q) r
@@ -1192,13 +1192,12 @@ addDelegate :: (MonadFLAMIO m, ToLabel a Principal, ToLabel b Principal, ToLabel
                a -> b -> c -> m ()
 addDelegate p q l = do
   lbl <- getLabel
-  (,) <$> lbl ≽ (∇) q <*> (∇) (p →) ≽ (∇) (q →) >>= \case
-    (True, True) -> do
+  lbl ≽ (∇) q >>= \case
+    True -> do
       lab <- label l (normalize (p %), normalize (q %))
       liftFLAMIO $ modifyCache $ prunedCache .~ Map.empty
       insertInHPtr lab
-    (False, _) -> error $ "IFC violation (addDelegate 1): " ++ show lbl ++ " ≽ " ++ show ((∇) q)
-    (_, False) -> error $ "IFC violation (addDelegate 2): " ++ show ((∇) (p →)) ++ " ≽ " ++ show ((∇) (q →))
+    False -> error $ "IFC violation (addDelegate 1): " ++ show lbl ++ " ≽ " ++ show ((∇) q)
 
 removeDelegate :: (MonadFLAMIO m, ToLabel a Principal, ToLabel b Principal, ToLabel c Principal) =>
                   a -> b -> c -> m ()
@@ -1241,7 +1240,7 @@ runFLAMWithCache clr c m h socks = do
           Map.empty)
         (Set.empty, Set.empty))
       (FLAMIOSt c socks Map.empty h 0))
-    (BoundedLabel { _cur = bot, _clearance = (clr →) ∧ ((⊥) ←) }, noStrategy)
+    (BoundedLabel { _cur = ((⊥) →) ∧ (clr ←), _clearance = (clr →) ∧ ((⊥) ←) }, noStrategy)
 
 runFLAM :: ToLabel b Principal => b -> FLAMIO a -> IO a
 runFLAM clr m = do
