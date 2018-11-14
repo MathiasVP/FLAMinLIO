@@ -46,7 +46,7 @@ data BoundedLabel l = BoundedLabel { _cur :: l, _clearance :: l }
   deriving (Eq, Ord, Show)
 
 makeLenses ''BoundedLabel
-  
+
 newtype Strategy l = Strategy { unStrategy :: [l] }
   deriving (Eq, Ord, Functor, Generic, Show)
 
@@ -68,7 +68,7 @@ instance MonadLIO l m => MonadLIO l (StateT st m) where
 
 instance MonadLIO l m => MonadLIO l (ReaderT r m) where
   liftLIO m = ReaderT (const $ liftLIO m)
-  
+
 class (Show l, SemiLattice l) => Label l where
   type C l :: (* -> *) -> Constraint
   (⊑) :: (MonadLIO l m, C l m, ToLabel a l, ToLabel b l) =>
@@ -90,7 +90,7 @@ instance Label l => Applicative (LIO l) where
 instance Label l => MonadState (BoundedLabel l, Strategy l) (LIO l) where
   get = LIO . StateT $ \s -> return (s, s)
   put s = LIO . StateT $ const (return ((), s))
-  
+
 getLabel :: (MonadLIO l m, Label l) => m l
 getLabel = liftLIO $ gets $ view $ _1 . cur
 
@@ -113,7 +113,7 @@ raise msg l = do
            show (view cur l') ++ " ⊔ " ++ show l  ++
            " ⊑ " ++ show (view clearance l'))
   liftLIO $ modify $ over (_1 . cur) (l .⊔.)
-  
+
 (<&&>) :: (Monad m) => m Bool -> m Bool -> m Bool
 (<&&>) m1 m2 =
   m1 >>= \case
@@ -130,12 +130,9 @@ infixr 7 <||>
 
 (∈) :: (MonadLIO l m, Label l, C l m) => l -> BoundedLabel l -> m Bool
 (∈) l lab = do
-  --liftLIO $ LIO $ lift $ putStrLn $ show (view cur lab) ++ " ⊑ " ++ show l
   x <- view cur lab ⊑ l
   if not x then return False
-  else do
-    --liftLIO $ LIO $ lift $ putStrLn $ show l ++ " ⊑ " ++ show (view clearance lab)  
-    l ⊑ view clearance lab
+  else l ⊑ view clearance lab
 
 label :: (MonadLIO l m, Label l, C l m, ToLabel c l) => c -> a -> m (Labeled l a)
 label c x = do
@@ -148,7 +145,7 @@ label c x = do
            " ⊑ " ++ show (view clearance lab))
   return $ Labeled {_labeledLab = l, _labeledVal = x }
   where l = (%) c
-  
+
 unlabel :: (MonadLIO l m, Label l, C l m) => Labeled l a -> m a
 unlabel lab = do
   raise "unlabel" (labelOf lab)
@@ -164,6 +161,16 @@ toLabeled c m = do
     fail ("IFC violation (toLabeled): " ++ show l'' ++ " ⊑ " ++ show ((%) c :: l))
   liftLIO $ modify $ (_1 .~ l')
   label c res
+
+toLabeled_ :: forall l m c a . (MonadLIO l m, Label l, C l m, ToLabel c l) => c -> m () -> m ()
+toLabeled_ c m = do
+  l' <- liftLIO $ gets $ view _1
+  res <- m
+  l'' <- liftLIO $ gets $ view $ _1 . cur
+  b <- l'' ⊑ c
+  unless b $ do
+    fail ("IFC violation (toLabeled): " ++ show l'' ++ " ⊑ " ++ show ((%) c :: l))
+  liftLIO $ modify $ (_1 .~ l')
 
 lFmap :: forall l m a b . (MonadLIO l m, Label l, C l m) => Labeled l a -> (a -> b) -> m (Labeled l b)
 lFmap (Labeled l v) f = do
@@ -210,7 +217,7 @@ writeRef (LIORef lref) x = do
            show (view cur lab) ++
            " ⊑ " ++ show (labelOf lref) ++
            " ⊑ " ++ show (view clearance lab))
-    
+
   unlabel lref >>= \ref ->
     liftLIO . LIO . StateT $ \s -> do
       writeIORef ref x
@@ -229,7 +236,7 @@ instance Label l => MonadCatch (LIO l) where
 instance Label l => MonadMask (LIO l) where
   mask a = LIO $ mask $ \u -> unLIO (a $ q u)
     where q u (LIO b) = LIO (u b)
-    
+
   uninterruptibleMask a = LIO $ uninterruptibleMask $ \u -> unLIO (a $ q u)
     where q u (LIO b) = LIO (u b)
 

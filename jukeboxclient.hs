@@ -39,8 +39,6 @@ example = do
         rpc socket "vote" song >>= \case
           Just (b :: Bool) -> liftIO $ putStrLn "Voted for song"
           Nothing -> liftIO $ putStrLn "RPC error!"
-      liftIO getLine
-      return ()
 
   asUser "I" $ do
     lbl <- getLabel
@@ -51,8 +49,6 @@ example = do
         rpc socket "vote" song >>= \case
           Just (b :: Bool) -> liftIO $ putStrLn "Voted for song"
           Nothing -> liftIO $ putStrLn "RPC error!"
-      liftIO getLine
-      return ()
 
   asUser "F" $ do
     lbl <- getLabel
@@ -63,8 +59,6 @@ example = do
         rpc socket "vote" song >>= \case
           Just (b :: Bool) -> liftIO $ putStrLn "Voted for song"
           Nothing -> liftIO $ putStrLn "RPC error!"
-      liftIO getLine
-      return ()
 
   asUser "M" $ do
     lbl <- getLabel
@@ -73,8 +67,6 @@ example = do
         rpc socket "play" (0 :: Int) >>= \case
           Just (s :: String) -> liftIO $ putStrLn $ "Playing song: " ++ show s
           Nothing -> liftIO $ putStrLn "RPC error!"
-      liftIO getLine
-      return ()
 
 main :: IO ()
 main = runFLAM "M" example

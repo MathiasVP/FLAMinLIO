@@ -80,33 +80,36 @@ balance tok s = do
 
 transfer :: MonadFLAMIO m => Labeled Principal Principal -> String -> String -> Int -> BankT m Bool
 transfer tok sFrom sTo n = do
-  u <- unlabel tok
-  u ≽ sFrom >>= \case
-    False -> return False
-    True -> do
-      mvar <- get
-      b <- liftFLAMIO $ liftIO $ readMVar mvar
-      case Map.lookup sFrom b of
-        Just lnFrom -> do
-          nFrom <- unlabel lnFrom
-          if nFrom >= n then
-            case Map.lookup sTo b of
-              Just lnTo -> do
-                clr <- getClearance
-                toLabeled clr $ do
-                  nTo <- unlabel lnTo
-                  lnTo' <- newScope $ do
-                             lbl <- getLabel
-                             addDelegate (sTo →) ("B" →) lbl
-                             label sTo (nTo + n)
-                  liftFLAMIO $ liftIO $ putMVar mvar $
-                    Map.insert sTo lnTo' b
+  lbl <- getLabel
+  newScope $ do
+    -- This delegation is needed to ensure that we can contact
+    -- sFrom for authorization queries after having unlabeled
+    -- sTo's bank account information.
+    addDelegate (sFrom →) (sTo →) lbl
+    u <- unlabel tok
+    u ≽ sFrom >>= \case
+      False -> return False
+      True -> do
+        mvar <- get
+        b <- liftFLAMIO $ liftIO $ readMVar mvar
+        case Map.lookup sFrom b of
+          Just lnFrom -> do
+            nFrom <- unlabel lnFrom
+            if nFrom >= n then
+              case Map.lookup sTo b of
+                Just lnTo -> do
+                  clr <- getClearance
+                  toLabeled_ clr $ do
+                    nTo <- unlabel lnTo
+                    lnTo' <- label sTo (nTo + n)
+                    liftFLAMIO $ liftIO $ modifyMVar_ mvar
+                      (return . Map.insert sTo lnTo')
 
-                toLabeled clr $ do
-                  b' <- liftFLAMIO $ liftIO $ readMVar mvar
-                  lnFrom' <- label sFrom (nFrom - n)
-                  liftFLAMIO $ liftIO $ putMVar mvar $
-                    Map.insert sFrom lnFrom' b'
-                return True
-          else return False
-        Nothing -> return False
+                  toLabeled_ clr $ do
+                    lbl <- getLabel
+                    lnFrom' <- label sFrom (nFrom - n)                  
+                    liftFLAMIO $ liftIO $ modifyMVar_ mvar
+                      (return . Map.insert sFrom lnFrom')
+                  return True
+            else return False
+          Nothing -> return False

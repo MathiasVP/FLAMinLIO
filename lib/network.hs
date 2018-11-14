@@ -56,7 +56,6 @@ waitForQuery chanSend chanRecvFwdQuery lbl clr mvarH mvarSocks = do
         send chanSend b FwdResponse
         waitForQuery chanSend chanRecvFwdQuery lbl' clr' mvarH mvarSocks
       Nothing -> do
-        --liftIO $ putStrLn $ "Error receiving query!"
         send chanSend False FwdResponse
         waitForQuery chanSend chanRecvFwdQuery lbl clr mvarH mvarSocks)
     (\(e :: SomeException) -> return ())

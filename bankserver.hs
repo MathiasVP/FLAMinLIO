@@ -49,7 +49,7 @@ example = do
 
 main :: IO ()
 main = do
-  st <- newMVar (Map.fromList [("Alice", Labeled ("Alice" →) 50),
-                               ("Bob", Labeled ("Bob" →) 50)])
+  st <- newMVar (Map.fromList [("Alice", Labeled (("Alice" →) ∧ ("B" ←)) 50),
+                               ("Bob", Labeled (("Bob" →) ∧ ("B" ←)) 50)])
   b <- runFLAM "B" $ execBankT example st
   return ()

@@ -21,6 +21,7 @@ asUser :: ToLabel a Principal => MonadFLAMIO m => a -> m () -> m ()
 asUser u m = do
   label <- getLabel
   clr <- getClearance
+  liftLIO $ modify $ _1 . cur .~ ((⊥) →) ∧ (u ←)
   liftLIO $ modify $ _1 . clearance .~ (u →) ∧ ((⊥) ←)
   _ <- m
   liftLIO $ modify $ _1 . clearance .~ clr
@@ -29,24 +30,29 @@ asUser u m = do
 example :: FLAMIO ()
 example = do
   asUser "Bob" $ do
-    withStrategy [bot] $ do
-      addDelegate ("B" →) ("Bob" →) bot
-
+    addDelegate "B" "Bob" ("Bob" ←)
+  
   withStrategy [bot] $ do
     asUser "Alice" $ do
       connect "127.0.0.1" "8000" $ \socket -> do
         withStrategy [bot] $ do
-          addDelegate ("B" →) ("Alice" →) bot
-
-          addDelegate ("Bob" →) ("Alice" →) bot
+          addDelegate "B" "Alice" ("Alice" ←)
+          addDelegate ("Bob" →) ("Alice" →) ("Alice" ←)
+        liftIO $ putStrLn "Logging in ..."
         rpc socket "login" "Alice" "password" >>= \case
           Just (tok :: Labeled Principal Principal) -> do
+            liftIO $ putStrLn "Success!"
             withStrategy [bot] $ do
+              liftIO $ putStrLn "Checking balance ..."
               rpc socket "balance" tok "Alice" >>= \case
-                Just (n :: Maybe Int) -> do
-                  rpc socket "transfer" tok "Alice" "Bob" (25 :: Int) >>= \case
-                    Just (b :: Bool) -> liftIO $ print b
+                Just (Just n :: Maybe Int) -> do
+                  liftIO $ putStrLn $ "Balance: " ++ show n
+                  liftIO $ putStrLn "Transferring money"
+                  rpc socket "transfer" tok "Alice" "Bob" (n `div` 2 :: Int) >>= \case
+                    Just True -> liftIO $ putStrLn "Success!"
                     Nothing -> error "RPC error!"
+                Just (Nothing :: Maybe Int) -> do
+                  liftIO $ putStrLn $ "Error: Could not read balance!"
                 Nothing -> error "RPC error!"
           Nothing -> error "RPC error!"
         
